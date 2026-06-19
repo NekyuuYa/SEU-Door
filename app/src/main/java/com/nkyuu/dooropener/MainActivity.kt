@@ -27,6 +27,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import android.webkit.WebView
 import java.util.concurrent.atomic.AtomicBoolean
 
 // 门锁返回这些码说明本地离线凭证已过期/需更新，自动重新同步
@@ -71,6 +72,10 @@ private class MainViews(root: View) {
 private class ConfigDialogViews(val root: View) {
     val phoneInput: EditText = root.requireView(R.id.phone_input)
     val passwordInput: EditText = root.requireView(R.id.password_input)
+    val captchaContainer: View = root.requireView(R.id.captcha_container)
+    val captchaInput: EditText = root.requireView(R.id.captcha_input)
+    val captchaWebView: WebView = root.requireView(R.id.captcha_webview)
+    val captchaRefreshButton: View = root.requireView(R.id.captcha_refresh_button)
     val errorMessage: TextView = root.requireView(R.id.error_message)
     val cancelButton: View = root.requireView(R.id.cancel_button)
     val syncButton: View = root.requireView(R.id.sync_button)
@@ -428,6 +433,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         val snapshot = store.load()
         dialogBinding.phoneInput.setText(snapshot?.phone.orEmpty())
         dialogBinding.passwordInput.setText(snapshot?.password.orEmpty())
+        configureCaptchaWebView(dialogBinding.captchaWebView)
+        setCaptchaVisible(dialogBinding, false)
 
         val dialog = AlertDialog.Builder(this)
             .setView(dialogBinding.root)
@@ -437,6 +444,15 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             dialogBinding.cancelButton.setOnClickListener {
                 dialog.dismiss()
             }
+            dialogBinding.captchaRefreshButton.setOnClickListener {
+                val phone = dialogBinding.phoneInput.trimmedText()
+                if (phone.isBlank()) {
+                    dialogBinding.errorMessage.text = getString(R.string.err_phn)
+                    dialogBinding.errorMessage.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
+                refreshCaptcha(dialogBinding, phone)
+            }
             dialogBinding.syncButton.setOnClickListener {
                 val phone = dialogBinding.phoneInput.trimmedText()
                 val password = dialogBinding.passwordInput.trimmedText()
@@ -445,18 +461,37 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                     dialogBinding.errorMessage.visibility = View.VISIBLE
                     return@setOnClickListener
                 }
+                val requiresCaptcha = dialogBinding.captchaContainer.visibility == View.VISIBLE
+                val captcha = dialogBinding.captchaInput.trimmedText()
+                if (requiresCaptcha && captcha.isBlank()) {
+                    dialogBinding.errorMessage.text = getString(R.string.err_captcha_manual)
+                    dialogBinding.errorMessage.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
 
                 dialogBinding.errorMessage.visibility = View.GONE
                 setConfigDialogLoading(true)
                 Thread {
                     try {
-                        val fresh = DoorApi().syncCredential(phone, password)
+                        val fresh = DoorApi().syncCredential(
+                            phone = phone,
+                            password = password,
+                            code = captcha.takeIf { it.isNotBlank() }
+                        )
                         store.save(fresh)
                         runOnUiThread {
                             hasCredential = true
                             updateIdleStatus()
                             Toast.makeText(this, getString(R.string.tst_syn), Toast.LENGTH_SHORT).show()
                             dialog.dismiss()
+                        }
+                    } catch (e: DoorCaptchaRequiredException) {
+                        runOnUiThread {
+                            prepareCaptchaChallenge(dialogBinding)
+                            dialogBinding.errorMessage.text =
+                                e.serverMessage ?: getString(R.string.err_captcha_manual)
+                            dialogBinding.errorMessage.visibility = View.VISIBLE
+                            refreshCaptcha(dialogBinding, phone)
                         }
                     } catch (e: Exception) {
                         runOnUiThread {
@@ -471,6 +506,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         }
 
         dialog.setOnDismissListener {
+            dialogBinding.captchaWebView.stopLoading()
             configViews = null
             configDialog = null
         }
@@ -486,8 +522,60 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         val dialogBinding = configViews ?: return
         dialogBinding.phoneInput.isEnabled = !loading
         dialogBinding.passwordInput.isEnabled = !loading
+        dialogBinding.captchaInput.isEnabled = !loading
+        dialogBinding.captchaRefreshButton.isEnabled = !loading
         dialogBinding.syncButton.isEnabled = !loading
         dialogBinding.cancelButton.isEnabled = !loading && hasCredential
+    }
+
+    private fun configureCaptchaWebView(webView: WebView) {
+        // SVG 静态图，关掉 JS 即可（其余项本就是默认值）
+        webView.settings.javaScriptEnabled = false
+        webView.setBackgroundColor(0xFFFFFFFF.toInt())
+    }
+
+    private fun refreshCaptcha(dialogBinding: ConfigDialogViews, phone: String) {
+        setConfigDialogLoading(true)
+        dialogBinding.errorMessage.visibility = View.GONE
+        Thread {
+            try {
+                val svg = DoorApi().fetchLoginCaptchaSvg(phone)
+                runOnUiThread {
+                    showCaptchaChallenge(dialogBinding, svg)
+                    setConfigDialogLoading(false)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    dialogBinding.errorMessage.text = e.resolveMessage(this)
+                    dialogBinding.errorMessage.visibility = View.VISIBLE
+                    setConfigDialogLoading(false)
+                }
+            }
+        }.start()
+    }
+
+    private fun prepareCaptchaChallenge(dialogBinding: ConfigDialogViews) {
+        setCaptchaVisible(dialogBinding, true)
+        dialogBinding.captchaInput.text?.clear()
+        dialogBinding.captchaInput.requestFocus()
+    }
+
+    private fun showCaptchaChallenge(dialogBinding: ConfigDialogViews, svg: String) {
+        prepareCaptchaChallenge(dialogBinding)
+        renderCaptchaSvg(dialogBinding.captchaWebView, svg)
+    }
+
+    private fun setCaptchaVisible(dialogBinding: ConfigDialogViews, visible: Boolean) {
+        dialogBinding.captchaContainer.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) {
+            dialogBinding.captchaInput.text?.clear()
+            renderCaptchaSvg(dialogBinding.captchaWebView, null)
+        }
+    }
+
+    private fun renderCaptchaSvg(webView: WebView, svg: String?) {
+        val html = "<body style=\"margin:0;background:#fff\">${svg.orEmpty()}</body>"
+        webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
     }
 
     private fun setNfc(title: String, detail: String, kind: DoorStatusKind = DoorStatusKind.Idle) {
@@ -589,11 +677,16 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(
-                        this,
-                        getString(R.string.tst_rff, e.resolveMessage(this)),
-                        Toast.LENGTH_LONG
-                    ).show()
+                    if (e is DoorCaptchaRequiredException) {
+                        Toast.makeText(this, getString(R.string.err_captcha_manual), Toast.LENGTH_LONG).show()
+                        showConfigDialogWithCaptcha(snapshot.phone, snapshot.password)
+                    } else {
+                        Toast.makeText(
+                            this,
+                            getString(R.string.tst_rff, e.resolveMessage(this)),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             } finally {
                 busy.set(false)
@@ -739,10 +832,18 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                         false,
                         getString(R.string.st_fail),
                         uid,
-                        rawText("凭证 %1\$s，自动刷新失败：%2\$s",
-                            decoded.resultMessageResId.resolve(this),
-                            e.resolveMessage(this)
-                        ).resolve(this)
+                        if (e is DoorCaptchaRequiredException) {
+                            rawText(
+                                "凭证 %1\$s，自动刷新需要验证码，请到配置页手动同步",
+                                decoded.resultMessageResId.resolve(this)
+                            ).resolve(this)
+                        } else {
+                            rawText(
+                                "凭证 %1\$s，自动刷新失败：%2\$s",
+                                decoded.resultMessageResId.resolve(this),
+                                e.resolveMessage(this)
+                            ).resolve(this)
+                        }
                     )
                 }
             }
@@ -838,11 +939,20 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    setBle(
-                        getString(R.string.st_fail),
-                        e.resolveMessage(this),
-                        DoorStatusKind.Error
-                    )
+                    if (e is DoorCaptchaRequiredException) {
+                        setBle(
+                            getString(R.string.st_fail),
+                            getString(R.string.err_captcha_manual),
+                            DoorStatusKind.Error
+                        )
+                        showConfigDialogWithCaptcha(snapshot.phone, snapshot.password)
+                    } else {
+                        setBle(
+                            getString(R.string.st_fail),
+                            e.resolveMessage(this),
+                            DoorStatusKind.Error
+                        )
+                    }
                 }
             } finally {
                 busy.set(false)
@@ -862,6 +972,17 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
     private fun EditText.trimmedText(): String {
         return text?.toString()?.trim().orEmpty()
+    }
+
+    private fun showConfigDialogWithCaptcha(phone: String, password: String) {
+        showConfigDialog()
+        val dialogBinding = configViews ?: return
+        dialogBinding.phoneInput.setText(phone)
+        dialogBinding.passwordInput.setText(password)
+        prepareCaptchaChallenge(dialogBinding)
+        dialogBinding.errorMessage.text = getString(R.string.err_captcha_manual)
+        dialogBinding.errorMessage.visibility = View.VISIBLE
+        refreshCaptcha(dialogBinding, phone)
     }
 
     private fun Throwable.resolveMessage(context: MainActivity): String {

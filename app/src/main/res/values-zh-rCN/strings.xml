@@ -7,6 +7,7 @@
     <string name="bl_on">请先开启蓝牙</string>
     <string name="bl_perm">缺少蓝牙权限</string>
     <string name="btn_ble">蓝牙开门</string>
+    <string name="btn_captcha_refresh">刷新图片</string>
     <string name="btn_syn">同步门禁凭证</string>
     <string name="cfg_hnt">手机号和密码只用于同步本地离线凭证，供 NFC 和蓝牙开门使用。</string>
     <string name="dlg_cfg">配置门禁账号</string>
@@ -18,11 +19,13 @@
     <string name="dt_nop">
 %1$s</string>
     <string name="err_crd">凭证不可用</string>
+    <string name="err_captcha_manual">当前登录需要验证码，请输入后再同步。</string>
     <string name="err_nfc">当前设备不支持NFC</string>
     <string name="err_nfc2">请先开启NFC</string>
     <string name="err_phn">请输入手机号和密码</string>
     <string name="err_syn">请先同步凭证</string>
     <string name="err_unk">未知错误</string>
+    <string name="fld_captcha">验证码</string>
     <string name="fld_phn">手机号</string>
     <string name="fld_pwd">密码</string>
     <string name="sd_bler">设备: %1$s

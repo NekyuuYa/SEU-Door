@@ -15,15 +15,8 @@ import java.security.SecureRandom
 
 class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
-    fun syncCredential(phone: String, password: String): DoorCredentialSnapshot {
-        val loginData = authGet(
-            path = "/webapi/users/login",
-            params = mutableMapOf(
-                "phone" to phone,
-                "pwd" to password
-            ),
-            nonceLength = AUTH_NONCE_LENGTH
-        )
+    fun syncCredential(phone: String, password: String, code: String? = null): DoorCredentialSnapshot {
+        val loginData = login(phone, password, code)
 
         val userId = requireString(loginData, "id", "user_id", "userId", "uid")
         val identityCode = requireString(loginData, "identity_code", "identitycode")
@@ -90,6 +83,45 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         )
     }
 
+    fun fetchLoginCaptchaSvg(phone: String): String {
+        var lastError: Throwable? = null
+        repeat(CAPTCHA_FETCH_ATTEMPTS) { attempt ->
+            try {
+                return fetchLoginCaptchaSvgOnce(phone)
+            } catch (error: Throwable) {
+                lastError = error
+                if (attempt + 1 < CAPTCHA_FETCH_ATTEMPTS) {
+                    Thread.sleep(CAPTCHA_RETRY_DELAY_MS)
+                }
+            }
+        }
+        throw lastError ?: captchaError()
+    }
+
+    private fun fetchLoginCaptchaSvgOnce(phone: String): String {
+        val body = authGetRaw(
+            path = "/webapi/users/get_login_code",
+            params = mutableMapOf("phone" to phone),
+            nonceLength = AUTH_NONCE_LENGTH
+        )
+
+        val outer = parseJsonObject(body) ?: throw captchaError()
+        if (!isSuccess(outer)) {
+            val serverMessage = extractServerMessage(outer)
+            throw DoorApiException(
+                text = serverMessage?.let { rawText(it) } ?: rawText("服务器返回失败"),
+                serverMessage = serverMessage
+            )
+        }
+
+        // data 缺失 / base64 不合法 / 内层非 JSON / 无 svg —— 都归为同一类「取不到验证码」
+        val decoded = decodeBase64Text(outer.optString("data"))?.trim() ?: throw captchaError()
+        val inner = parseJsonObject(decoded) ?: throw captchaError()
+        return extractSvgSnippet(inner.optString("codeImg")) ?: throw captchaError()
+    }
+
+    private fun captchaError() = DoorApiException(rawText("验证码获取失败"))
+
     fun fetchActivationPayload(snapshot: DoorCredentialSnapshot, deviceId: Int): ByteArray {
         val data = businessGet(
             baseUrl = snapshot.serverUrl,
@@ -127,6 +159,42 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         )
     }
 
+    private fun authGetRaw(path: String, params: MutableMap<String, String>, nonceLength: Int): String {
+        val signedParams = signParams(
+            params = params,
+            secret = AUTH_SIGN_SECRET,
+            nonceLength = nonceLength
+        )
+        return performGetRaw(
+            baseUrl = normalizeServerUrl(authServerUrl),
+            path = path,
+            params = signedParams
+        )
+    }
+
+    private fun login(phone: String, password: String, code: String?): Any {
+        val params = mutableMapOf(
+            "phone" to phone,
+            "pwd" to password
+        )
+        if (!code.isNullOrBlank()) {
+            params["code"] = code
+        }
+
+        return try {
+            authGet(
+                path = "/webapi/users/login",
+                params = params,
+                nonceLength = AUTH_NONCE_LENGTH
+            )
+        } catch (exception: DoorApiException) {
+            if (exception.serverMessage?.let(::isCaptchaRelatedMessage) != true) {
+                throw exception
+            }
+            throw DoorCaptchaRequiredException(serverMessage = exception.serverMessage)
+        }
+    }
+
     private fun businessGet(
         baseUrl: String,
         sessionSecret: String,
@@ -151,6 +219,17 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         try {
             connection.requestMethod = "GET"
             return readEnvelope(connection)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun performGetRaw(baseUrl: String, path: String, params: Map<String, String>): String {
+        val query = encodeParams(params)
+        val connection = openConnection(baseUrl, "$path?$query")
+        try {
+            connection.requestMethod = "GET"
+            return readBody(connection)
         } finally {
             connection.disconnect()
         }
@@ -195,9 +274,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
     private fun readEnvelope(connection: HttpURLConnection): Any {
         val statusCode = connection.responseCode
-        val body = (if (statusCode in 200..299) connection.inputStream else connection.errorStream)
-            ?.readAllText()
-            .orEmpty()
+        val body = readBody(connection, statusCode)
         if (body.isBlank()) {
             throw DoorApiException(rawText("服务器返回空响应 (HTTP %1\$s)", statusCode))
         }
@@ -209,14 +286,13 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         }
 
         if (!isSuccess(root)) {
-            val serverMessage = root.optString("err_msg")
-                .ifBlank { root.optString("msg") }
-                .ifBlank { root.optString("message") }
+            val serverMessage = extractServerMessage(root)
+            val nonBlankServerMessage = serverMessage?.takeIf { it.isNotBlank() }
             throw DoorApiException(
-                serverMessage
-                    .takeIf { it.isNotBlank() }
+                nonBlankServerMessage
                     ?.let { rawText(it) }
-                    ?: rawText("服务器返回失败: HTTP %1\$s", statusCode)
+                    ?: rawText("服务器返回失败: HTTP %1\$s", statusCode),
+                serverMessage = nonBlankServerMessage
             )
         }
 
@@ -225,6 +301,13 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         }
 
         return decodeData(root.get("data"))
+    }
+
+    private fun readBody(connection: HttpURLConnection, resolvedStatusCode: Int? = null): String {
+        val statusCode = resolvedStatusCode ?: connection.responseCode
+        return (if (statusCode in 200..299) connection.inputStream else connection.errorStream)
+            ?.readAllText()
+            .orEmpty()
     }
 
     private fun decodeData(raw: Any): Any {
@@ -245,17 +328,57 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             return JSONArray(trimmed)
         }
 
-        val decodedText = try {
-            String(Base64.decode(trimmed, Base64.DEFAULT), Charsets.UTF_8)
-        } catch (_: Exception) {
-            return trimmed
-        }
+        val decodedText = decodeBase64Text(trimmed) ?: return trimmed
         val normalized = decodedText.trim()
         return when {
             normalized.startsWith("{") -> JSONObject(normalized)
             normalized.startsWith("[") -> JSONArray(normalized)
             else -> normalized
         }
+    }
+
+    private fun extractSvgSnippet(text: String): String? {
+        val normalized = text.trim()
+        val start = normalized.indexOf("<svg", ignoreCase = true)
+        if (start < 0) return null
+
+        val endToken = "</svg>"
+        val end = normalized.lowercase().lastIndexOf(endToken)
+        if (end <= start) return null
+        return normalized.substring(start, end + endToken.length)
+    }
+
+    private fun decodeBase64Text(value: String): String? {
+        val trimmed = value.trim()
+        val candidates = linkedSetOf(
+            trimmed,
+            trimmed.replace('-', '+').replace('_', '/')
+        )
+
+        for (candidate in candidates) {
+            val padded = when (candidate.length % 4) {
+                2 -> "$candidate=="
+                3 -> "$candidate="
+                else -> candidate
+            }
+            runCatching {
+                return String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+            }
+        }
+        return null
+    }
+
+    private fun parseJsonObject(value: String): JSONObject? {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("{")) return null
+        return runCatching { JSONObject(trimmed) }.getOrNull()
+    }
+
+    private fun extractServerMessage(root: JSONObject): String? {
+        return root.optString("err_msg")
+            .ifBlank { root.optString("msg") }
+            .ifBlank { root.optString("message") }
+            .takeIf { it.isNotBlank() }
     }
 
     private fun isSuccess(root: JSONObject): Boolean {
@@ -388,16 +511,35 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         private const val AUTH_SIGN_SECRET = "6d5dbb85b949447a95ff8fda9a9b759b"
         private const val AUTH_NONCE_LENGTH = 32
         private const val BUSINESS_NONCE_LENGTH = 16
+        private const val CAPTCHA_FETCH_ATTEMPTS = 2
+        private const val CAPTCHA_RETRY_DELAY_MS = 200L
         private val NONCE_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         private val random = SecureRandom()
+        private val CAPTCHA_MARKERS = listOf(
+            "本次登录需要进行验证",
+            "CAPTCHA_REQUIRED",
+            "验证码输入错误"
+        )
 
         fun normalizeServerUrl(raw: String): String {
             return raw.trim().trimEnd('/')
         }
+
+        private fun isCaptchaRelatedMessage(message: String): Boolean {
+            return CAPTCHA_MARKERS.any { marker -> message.contains(marker, ignoreCase = true) }
+        }
     }
 }
 
-class DoorApiException(
+open class DoorApiException(
     private val text: TextValue,
+    val serverMessage: String? = null,
     cause: Throwable? = null
 ) : LocalizedIOException(text, cause)
+
+class DoorCaptchaRequiredException(
+    serverMessage: String?
+) : DoorApiException(
+    text = rawText(serverMessage?.takeIf { it.isNotBlank() } ?: "本次登录需要进行验证"),
+    serverMessage = serverMessage
+)

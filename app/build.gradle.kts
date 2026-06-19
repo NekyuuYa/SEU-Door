@@ -7,10 +7,14 @@ android {
     namespace = "com.nkyuu.dooropener"
     compileSdk = 34
 
+    // 仅当本地存在 debug keystore 时才为 release 配置签名（方便本地 adb install）。
+    // CI 上没有该文件，release 会产出未签名包，交给 release.yml 用 apksigner 单独签名。
+    val debugKeystore = file(System.getProperty("user.home") + "/.android/debug.keystore")
     signingConfigs {
-        getByName("debug")
-        create("release") {
-            initWith(getByName("debug"))
+        if (debugKeystore.exists()) {
+            create("release") {
+                initWith(getByName("debug"))
+            }
         }
     }
 
@@ -29,7 +33,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
