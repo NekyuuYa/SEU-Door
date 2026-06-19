@@ -63,6 +63,7 @@ object DoorBle {
             session.connect()
 
             var openAttempt = performOpenSequence(
+                context = context,
                 session = session,
                 deviceId = deviceId,
                 credentialHex = snapshot.credentialHex,
@@ -73,11 +74,12 @@ object DoorBle {
             var refreshedCredential = false
             if (openAttempt.resultCode == 27) {
                 progress("门锁要求刷新凭证")
-                val refresh = refreshCredential(session, deviceId, snapshot, progress)
+                val refresh = refreshCredential(context, session, deviceId, snapshot, progress)
                 updatedCredentialHex = refresh.updatedCredentialHex
                 refreshedCredential = refresh.refreshed
                 progress("正在使用新凭证重试开门")
                 openAttempt = performOpenSequence(
+                    context = context,
                     session = session,
                     deviceId = deviceId,
                     credentialHex = refresh.updatedCredentialHex,
@@ -107,7 +109,7 @@ object DoorBle {
             return BleDoorOpenResult(
                 success = success,
                 resultCode = openAttempt.resultCode,
-                resultMessage = DoorCrypto.describeResultCode(openAttempt.resultCode),
+                resultMessage = DoorCrypto.describeResultCode(context, openAttempt.resultCode),
                 deviceName = target.displayName,
                 deviceAddress = target.address,
                 deviceId = deviceId,
@@ -302,6 +304,7 @@ object DoorBle {
     }
 
     private fun performOpenSequence(
+        context: Context,
         session: GattSession,
         deviceId: Int,
         credentialHex: String,
@@ -318,7 +321,7 @@ object DoorBle {
         ensureBleResponse(headerResponse, COMMAND_HEADER, "凭证头")
         val headerCode = headerResponse.resultCodeAt(0)
         if (headerCode != 0) {
-            throw DoorBleException("凭证头校验失败: ${DoorCrypto.describeResultCode(headerCode)} ($headerCode)")
+            throw DoorBleException("凭证头校验失败: ${DoorCrypto.describeResultCode(context, headerCode)} ($headerCode)")
         }
         val ran = headerResponse.littleEndianIntAt(4)
 
@@ -385,6 +388,7 @@ object DoorBle {
     }
 
     private fun refreshCredential(
+        context: Context,
         session: GattSession,
         deviceId: Int,
         snapshot: DoorCredentialSnapshot,
@@ -405,7 +409,7 @@ object DoorBle {
 
         val refetchCode = refetchResponse.resultCodeAt(0)
         if (refetchCode != 0 && refetchCode != 23) {
-            throw DoorBleException("门锁拒绝刷新凭证: ${DoorCrypto.describeResultCode(refetchCode)} ($refetchCode)")
+            throw DoorBleException("门锁拒绝刷新凭证: ${DoorCrypto.describeResultCode(context, refetchCode)} ($refetchCode)")
         }
 
         val packetCount = refetchResponse.plainData[1].toInt() and 0xFF

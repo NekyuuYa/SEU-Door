@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 baseline dark scheme (brand: indigo) -->
+    <color name="color_primary">#BCC3FF</color>
+    <color name="color_primary_container">#3745A0</color>
+    <color name="color_on_secondary_container">#E0E1F9</color>
+
+    <!-- Surfaces & tonal containers -->
+    <color name="color_surface">#121319</color>
+    <color name="color_surface_card">#1E1F26</color>
+    <color name="color_surface_container">#1F2027</color>
+    <color name="color_surface_dialog">#25262E</color>
+    <color name="color_surface_input">#31323C</color>
+    <color name="color_tab_selected_bg">#434559</color>
+    <color name="color_on_surface">#E4E1E9</color>
+    <color name="color_on_surface_variant">#C7C5D0</color>
+    <color name="color_outline">#918F9A</color>
+    <color name="color_outline_variant">#46464F</color>
+
+    <!-- Semantic -->
+    <color name="color_error">#FFB4AB</color>
+    <color name="color_error_container">#93000A</color>
+    <color name="color_success">#8FE89A</color>
+    <color name="color_success_container">#1F3D26</color>
+
+    <!-- Button states -->
+    <color name="button_primary_text">#1E2D78</color>
+    <color name="button_primary_disabled_bg">#2C2D35</color>
+    <color name="color_icon_button_ripple">#E4E1E9</color>
+    <color name="color_ripple_on_primary">#33000000</color>
+    <color name="color_ripple_primary">#33BCC3FF</color>
+</resources>

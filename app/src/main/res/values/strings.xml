@@ -1,4 +1,53 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <resources>
+    <string name="act_rfs">Refresh credential</string>
+    <string name="act_set">Settings</string>
     <string name="app_name">SEU Door</string>
+    <string name="bl_nrby">Nearby devices:</string>
+    <string name="bl_on">Turn on Bluetooth first</string>
+    <string name="bl_perm">Bluetooth permission is missing</string>
+    <string name="btn_ble">Unlock via Bluetooth</string>
+    <string name="btn_syn">Sync credential</string>
+    <string name="cfg_hnt">Your phone number and password are only used to sync the local offline credential for NFC and Bluetooth unlock.</string>
+    <string name="dlg_cfg">Configure door access account</string>
+    <string name="drBusy">Device is already in use</string>
+    <string name="dr_ok">Unlocked</string>
+    <string name="dt_dev">
+Account: %1$s
+Device ID: %2$d</string>
+    <string name="dt_nop">
+%1$s</string>
+    <string name="err_crd">Credential unavailable</string>
+    <string name="err_nfc">This device does not support NFC</string>
+    <string name="err_nfc2">Turn on NFC first</string>
+    <string name="err_phn">Enter phone number and password</string>
+    <string name="err_syn">Sync your credential first</string>
+    <string name="err_unk">Unknown error</string>
+    <string name="fld_phn">Phone number</string>
+    <string name="fld_pwd">Password</string>
+    <string name="sd_bler">Device: %1$s
+Address: %2$s
+Result: %3$d - %4$s%5$s</string>
+    <string name="sd_nfc">Offline unlock mode: waiting for NFC tag%1$s</string>
+    <string name="sd_prep">Preparing Bluetooth unlock</string>
+    <string name="sd_proc">Processing</string>
+    <string name="sd_res">Result: %1$s
+Device ID: %2$d
+UID: %3$s</string>
+    <string name="sd_rfrg">Refreshing…</string>
+    <string name="sd_tag">UID: %1$s
+Reading tag</string>
+    <string name="sd_tap">Tap the button below to unlock%1$s</string>
+    <string name="sd_wait">Processing, please wait</string>
+    <string name="st_ble">Bluetooth unlock</string>
+    <string name="st_crd">Credential refreshed</string>
+    <string name="st_fail">Unlock failed</string>
+    <string name="st_hold">Hold near the door lock</string>
+    <string name="st_ok">Unlocked</string>
+    <string name="st_rfs">Refresh credential</string>
+    <string name="tab_ble">Bluetooth</string>
+    <string name="tab_nfc">NFC</string>
+    <string name="tst_rff">Refresh failed: %1$s</string>
+    <string name="tst_rfr">Credential refreshed</string>
+    <string name="tst_syn">Credential synced</string>
 </resources>

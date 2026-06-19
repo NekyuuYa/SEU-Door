@@ -1,91 +1,144 @@
 package com.nkyuu.dooropener
 
 import android.Manifest
+import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.SharedPreferences
+import android.animation.ArgbEvaluator
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.content.res.ColorStateList
+import android.graphics.drawable.GradientDrawable
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
 import android.os.Bundle
+import android.text.method.ScrollingMovementMethod
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.OvershootInterpolator
+import android.view.animation.PathInterpolator
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.nkyuu.dooropener.ui.theme.DoorOpenerTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
-
-private val ErrorColor = Color(0xFFBA1A1A)
-private val SuccessColor = Color(0xFF1B8A3A)
-private val DefaultTextColor = Color(0xFF191C1B)
 
 // 门锁返回这些码说明本地离线凭证已过期/需更新，自动重新同步
 private val CREDENTIAL_REFRESH_CODES = setOf(24, 27)
 
-class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
+private enum class DoorStatusKind {
+    Idle,
+    Busy,
+    Success,
+    Error
+}
 
+private data class StatusState(
+    val title: String,
+    val detail: String,
+    val kind: DoorStatusKind = DoorStatusKind.Idle
+)
+
+private enum class MainTab {
+    Nfc,
+    Ble
+}
+
+private class MainViews(root: View) {
+    val statusDetail: TextView = root.requireView(R.id.status_detail)
+    val refreshButton: View = root.requireView(R.id.refresh_button)
+    val settingsButton: View = root.requireView(R.id.settings_button)
+    val bleOpenButton: View = root.requireView(R.id.ble_open_button)
+    val tabNfc: View = root.requireView(R.id.tab_nfc)
+    val tabBle: View = root.requireView(R.id.tab_ble)
+    val tabNfcLabel: TextView = root.requireView(R.id.tab_nfc_label)
+    val tabNfcIcon: ImageView = root.requireView(R.id.tab_nfc_icon)
+    val tabBleLabel: TextView = root.requireView(R.id.tab_ble_label)
+    val tabBleIcon: ImageView = root.requireView(R.id.tab_ble_icon)
+    val tabContainer: FrameLayout = root.requireView(R.id.tab_container)
+    val tabIndicator: View = root.requireView(R.id.tab_indicator)
+    val statusTitle: TextView = root.requireView(R.id.status_title)
+    val statusIcon: ImageView = root.requireView(R.id.status_icon)
+    val statusIconContainer: View = root.requireView(R.id.status_icon_container)
+}
+
+private class ConfigDialogViews(val root: View) {
+    val phoneInput: EditText = root.requireView(R.id.phone_input)
+    val passwordInput: EditText = root.requireView(R.id.password_input)
+    val errorMessage: TextView = root.requireView(R.id.error_message)
+    val cancelButton: View = root.requireView(R.id.cancel_button)
+    val syncButton: View = root.requireView(R.id.sync_button)
+}
+
+private fun <T : View> View.requireView(id: Int): T {
+    return findViewById<T>(id) ?: throw IllegalStateException("Missing required view: $id")
+}
+
+class MainActivity : Activity(), NfcAdapter.ReaderCallback {
+
+    companion object {
+        private const val PREFS_NAME = "door_opener_ui"
+        private const val PREF_LAST_TAB = "last_tab"
+        private const val REQ_BLE_PERMS = 1001
+    }
+
+    private lateinit var views: MainViews
+    private lateinit var prefs: SharedPreferences
     private lateinit var store: DoorConfigStore
     private var nfcAdapter: NfcAdapter? = null
 
     private val busy = AtomicBoolean(false)
     private var pendingBleOpen = false
+    private var selectedTab = MainTab.Nfc
+    private var configDialog: AlertDialog? = null
+    private var configViews: ConfigDialogViews? = null
 
-    // NFC / 蓝牙各自独立的状态，避免两个 Tab 串台
-    private val _nfcTitle = mutableStateOf("请靠近门锁")
-    private val _nfcDetail = mutableStateOf("")
-    private val _nfcColor = mutableStateOf(DefaultTextColor)
-    private val _bleTitle = mutableStateOf("蓝牙开门")
-    private val _bleDetail = mutableStateOf("")
-    private val _bleColor = mutableStateOf(DefaultTextColor)
-    private val _isBusy = mutableStateOf(false)
-    private val _showConfigDialog = mutableStateOf(false)
-    private val _hasCredential = mutableStateOf(false)
+    // NFC / 蓝牙各自独立的状态，避免两个页面串台
+    private var nfcState = StatusState("", "")
+    private var bleState = StatusState("", "")
+    private var isBusyState = false
+    private var hasCredential = false
 
-    private val blePermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (permissions.values.all { it } && pendingBleOpen) {
-            pendingBleOpen = false
-            startBleOpen()
-        } else {
-            setBle("开门失败", "未授予蓝牙权限", ErrorColor)
-        }
-    }
+    // 动画状态追踪：只在状态种类/页签变化时触发图标动画，避免进度刷新时反复抖动
+    private var renderedKind: DoorStatusKind? = null
+    private var renderedTab: MainTab? = null
+    private var currentIconBgColor: Int? = null
+    private var iconColorAnimator: ValueAnimator? = null
+    private var pulseAnimator: ValueAnimator? = null
+
+    // M3 强调缓动（emphasized decelerate）+ 成功状态的轻微回弹
+    private val emphasized = PathInterpolator(0.2f, 0f, 0f, 1f)
+    private val overshoot = OvershootInterpolator(2.0f)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        views = MainViews(findViewById(android.R.id.content))
+
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         store = DoorConfigStore(this)
-        _hasCredential.value = store.hasUsableCredential()
-
+        hasCredential = store.hasUsableCredential()
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+        selectedTab = readSavedTab()
 
-        setContent {
-            DoorOpenerTheme { MainScreen() }
+        setupViews()
+        updateIdleStatus()
+
+        if (!hasCredential) {
+            showConfigDialog()
         }
+        handleNfcIntent(intent)
+    }
 
-        if (!_hasCredential.value) _showConfigDialog.value = true
-        // 冷启动（贴卡唤起 app）时 intent 里可能带 Tag
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
         handleNfcIntent(intent)
     }
 
@@ -105,283 +158,449 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
 
     override fun onPause() {
         nfcAdapter?.disableReaderMode(this)
+        stopPulse()
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        iconColorAnimator?.cancel()
+        stopPulse()
+        configDialog?.dismiss()
+        configDialog = null
+        configViews = null
+        super.onDestroy()
     }
 
     override fun onTagDiscovered(tag: Tag) {
         handleTag(tag)
     }
 
-    // ==================== Compose UI ====================
-
-    @Composable
-    private fun MainScreen() {
-        var selectedTab by remember { mutableIntStateOf(0) }
-
-        Scaffold(
-            topBar = {
-                @OptIn(ExperimentalMaterial3Api::class)
-                CenterAlignedTopAppBar(
-                    title = { Text("SEU Door") },
-                    actions = {
-                        val isBusy by _isBusy
-                        IconButton(onClick = { refreshCredential() }, enabled = !isBusy) {
-                            Icon(Icons.Default.Refresh, "刷新凭证")
-                        }
-                        IconButton(onClick = { _showConfigDialog.value = true }) {
-                            Icon(Icons.Default.Settings, "配置")
-                        }
-                    }
-                )
-            },
-            bottomBar = {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        icon = { Icon(Icons.Default.Nfc, null) },
-                        label = { Text("NFC") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        icon = { Icon(Icons.Default.Bluetooth, null) },
-                        label = { Text("蓝牙") }
-                    )
-                }
-            }
-        ) { padding ->
-            Box(Modifier.padding(padding)) {
-                Crossfade(selectedTab, label = "tab") { tab ->
-                    if (tab == 0) NfcTab() else BleTab()
-                }
-            }
-        }
-
-        if (_showConfigDialog.value) ConfigDialog { _showConfigDialog.value = false }
-    }
-
-    @Composable
-    private fun StatusContent(
-        title: String,
-        detail: String,
-        statusColor: Color,
-        icon: androidx.compose.ui.graphics.vector.ImageVector,
-        iconTint: Color,
-        showButton: Boolean,
-        buttonText: String = "",
-        buttonEnabled: Boolean = true,
-        onButtonClick: () -> Unit = {},
-        buttonIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
-        buttonColors: ButtonColors = ButtonDefaults.buttonColors()
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
     ) {
-        // 开门成功时图标弹入
-        val iconScale = remember { Animatable(1f) }
-        LaunchedEffect(title) {
-            if (title.contains("成功")) {
-                iconScale.snapTo(0.3f)
-                iconScale.animateTo(
-                    1f,
-                    spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-                )
-            } else {
-                iconScale.snapTo(1f)
-            }
-        }
-
-        Column(
-            Modifier.fillMaxSize().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Spacer(Modifier.weight(1f))
-            Icon(icon, null, Modifier.size(80.dp).scale(iconScale.value), tint = iconTint)
-            Spacer(Modifier.height(16.dp))
-            Text(title, style = MaterialTheme.typography.headlineMedium,
-                color = statusColor, textAlign = TextAlign.Center)
-            if (detail.isNotBlank()) {
-                Spacer(Modifier.height(12.dp))
-                Card(Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceVariant)) {
-                    Text(detail, Modifier.padding(16.dp).verticalScroll(rememberScrollState()),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace, lineHeight = 18.sp)
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            if (showButton) {
-                Button(onClick = onButtonClick, enabled = buttonEnabled,
-                    colors = buttonColors,
-                    modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                    buttonIcon?.let { Icon(it, null); Spacer(Modifier.width(8.dp)) }
-                    Text(buttonText, style = MaterialTheme.typography.titleMedium)
-                }
-            }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_BLE_PERMS) return
+        val granted = grantResults.isNotEmpty() &&
+            grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        if (granted && pendingBleOpen) {
+            pendingBleOpen = false
+            startBleOpen()
+        } else {
+            pendingBleOpen = false
+            setBle(
+                getString(R.string.st_fail),
+                rawText("未授予蓝牙权限").resolve(this),
+                DoorStatusKind.Error
+            )
         }
     }
 
-    @Composable
-    private fun NfcTab() {
-        val title by _nfcTitle
-        val detail by _nfcDetail
-        val color by _nfcColor
+    private fun setupViews() {
+        views.statusDetail.movementMethod = ScrollingMovementMethod()
+        views.refreshButton.setOnClickListener { refreshCredential() }
+        views.settingsButton.setOnClickListener { showConfigDialog() }
+        views.bleOpenButton.setOnClickListener { startBleOpen() }
+        views.tabNfc.setOnClickListener { selectTab(MainTab.Nfc) }
+        views.tabBle.setOnClickListener { selectTab(MainTab.Ble) }
 
-        StatusContent(
-            title = title,
-            detail = detail,
-            statusColor = color,
-            icon = when {
-                title.contains("成功") -> Icons.Default.CheckCircle
-                title.contains("失败") -> Icons.Default.Error
-                else -> Icons.Default.Nfc
-            },
-            iconTint = when {
-                title.contains("成功") -> SuccessColor
-                title.contains("失败") -> ErrorColor
-                else -> MaterialTheme.colorScheme.primary
-            },
-            showButton = false
-        )
+        updateTabVisuals(animateIndicator = false)
+        views.tabContainer.post { positionSegmentIndicator(animate = false) }
     }
 
-    @Composable
-    private fun BleTab() {
-        val title by _bleTitle
-        val detail by _bleDetail
-        val color by _bleColor
-        val isBusy by _isBusy
-        val hasCred by _hasCredential
-
-        StatusContent(
-            title = title,
-            detail = detail,
-            statusColor = color,
-            icon = when {
-                title.contains("成功") -> Icons.Default.CheckCircle
-                title.contains("失败") -> Icons.Default.Error
-                else -> Icons.Default.Bluetooth
-            },
-            iconTint = when {
-                title.contains("成功") -> SuccessColor
-                title.contains("失败") -> ErrorColor
-                else -> MaterialTheme.colorScheme.primary
-            },
-            showButton = true,
-            buttonText = "蓝牙开门",
-            buttonEnabled = !isBusy && hasCred,
-            onButtonClick = { startBleOpen() },
-            buttonIcon = Icons.Default.Bluetooth
-        )
+    private fun selectTab(tab: MainTab) {
+        if (selectedTab == tab) return
+        selectedTab = tab
+        prefs.edit().putString(PREF_LAST_TAB, tab.name).apply()
+        updateTabVisuals(animateIndicator = true)
+        renderCurrentState()
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
-    @Composable
-    private fun ConfigDialog(onDismiss: () -> Unit) {
-        var phone by remember { mutableStateOf("") }
-        var password by remember { mutableStateOf("") }
-        var isLoading by remember { mutableStateOf(false) }
-        var errorMsg by remember { mutableStateOf<String?>(null) }
-        val scope = rememberCoroutineScope()
-        val ctx = this
+    private fun updateTabVisuals(animateIndicator: Boolean) {
+        applyTabStyle(views.tabNfcLabel, views.tabNfcIcon, selectedTab == MainTab.Nfc)
+        applyTabStyle(views.tabBleLabel, views.tabBleIcon, selectedTab == MainTab.Ble)
+        positionSegmentIndicator(animateIndicator)
+    }
 
-        LaunchedEffect(Unit) { store.load()?.let { phone = it.phone; password = it.password } }
+    private fun applyTabStyle(label: TextView, icon: ImageView, selected: Boolean) {
+        val color = if (selected) {
+            resolveColor(R.color.color_on_secondary_container)
+        } else {
+            resolveColor(R.color.color_on_surface_variant)
+        }
+        label.setTextColor(color)
+        icon.imageTintList = ColorStateList.valueOf(color)
+    }
 
-        ModalBottomSheet(onDismissRequest = { if (!isLoading) onDismiss() }) {
-            Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
-                Text("配置门禁账号", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(24.dp))
-                OutlinedTextField(phone, { phone = it.trim() }, label = { Text("手机号") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(), enabled = !isLoading)
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(password, { password = it.trim() }, label = { Text("密码") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(), enabled = !isLoading)
-                errorMsg?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text(it, color = ErrorColor, style = MaterialTheme.typography.bodySmall)
+    /** 把分段控件的“滑块”定位到当前选中的半区，可选动画过渡。 */
+    private fun positionSegmentIndicator(animate: Boolean) {
+        val container = views.tabContainer
+        if (container.width == 0) return
+        val pad = dp(4)
+        val indicatorWidth = (container.width - pad * 2) / 2
+        val indicatorHeight = container.height - pad * 2
+        val indicator = views.tabIndicator
+        val lp = indicator.layoutParams as FrameLayout.LayoutParams
+        if (lp.width != indicatorWidth || lp.height != indicatorHeight) {
+            lp.width = indicatorWidth
+            lp.height = indicatorHeight
+            lp.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            lp.marginStart = pad
+            indicator.layoutParams = lp
+        }
+        val targetX = if (selectedTab == MainTab.Ble) indicatorWidth.toFloat() else 0f
+        if (animate) {
+            indicator.animate()
+                .translationX(targetX)
+                .setDuration(300)
+                .setInterpolator(emphasized)
+                .start()
+        } else {
+            indicator.translationX = targetX
+        }
+    }
+
+    private fun renderCurrentState() {
+        val status = when (selectedTab) {
+            MainTab.Nfc -> nfcState
+            MainTab.Ble -> bleState
+        }
+        renderStatus(selectedTab, status)
+        views.bleOpenButton.visibility = if (selectedTab == MainTab.Ble) View.VISIBLE else View.GONE
+        views.bleOpenButton.isEnabled = !isBusyState && hasCredential
+        views.refreshButton.isEnabled = !isBusyState
+    }
+
+    private fun renderStatus(tab: MainTab, status: StatusState) {
+        views.statusTitle.text = status.title
+        views.statusDetail.text = status.detail
+
+        val iconRes = when (tab) {
+            MainTab.Nfc -> when (status.kind) {
+                DoorStatusKind.Success -> R.drawable.ic_check_circle
+                DoorStatusKind.Error -> R.drawable.ic_warning
+                DoorStatusKind.Idle, DoorStatusKind.Busy -> R.drawable.ic_nfc
+            }
+            MainTab.Ble -> when (status.kind) {
+                DoorStatusKind.Success -> R.drawable.ic_check_circle
+                DoorStatusKind.Error -> R.drawable.ic_warning
+                DoorStatusKind.Idle, DoorStatusKind.Busy -> R.drawable.ic_bluetooth
+            }
+        }
+
+        val statusColor = when (status.kind) {
+            DoorStatusKind.Success -> resolveColor(R.color.color_success)
+            DoorStatusKind.Error -> resolveColor(R.color.color_error)
+            DoorStatusKind.Idle, DoorStatusKind.Busy -> resolveColor(R.color.color_on_surface)
+        }
+        val iconTint = when (status.kind) {
+            DoorStatusKind.Success -> resolveColor(R.color.color_success)
+            DoorStatusKind.Error -> resolveColor(R.color.color_error)
+            DoorStatusKind.Idle, DoorStatusKind.Busy -> resolveColor(R.color.color_primary)
+        }
+        val iconBackground = when (status.kind) {
+            DoorStatusKind.Success -> resolveColor(R.color.color_success_container)
+            DoorStatusKind.Error -> resolveColor(R.color.color_error_container)
+            DoorStatusKind.Idle, DoorStatusKind.Busy -> resolveColor(R.color.color_primary_container)
+        }
+
+        views.statusTitle.setTextColor(statusColor)
+
+        val kindChanged = status.kind != renderedKind
+        val changed = kindChanged || tab != renderedTab
+        if (changed) {
+            animateIconChange(iconRes, iconTint, iconBackground, status.kind, gentle = !kindChanged)
+        } else {
+            views.statusIcon.setImageResource(iconRes)
+            views.statusIcon.imageTintList = ColorStateList.valueOf(iconTint)
+            applyIconBackground(iconBackground, animate = false)
+        }
+
+        renderedKind = status.kind
+        renderedTab = tab
+        updateIdlePulse(tab, status.kind)
+    }
+
+    /** 状态种类切换时：图标淡入缩放（成功回弹、失败抖动）+ 背景色渐变。 */
+    private fun animateIconChange(
+        iconRes: Int,
+        iconTint: Int,
+        iconBackground: Int,
+        kind: DoorStatusKind,
+        gentle: Boolean
+    ) {
+        val icon = views.statusIcon
+        stopPulse()
+        applyIconBackground(iconBackground, animate = true)
+
+        icon.setImageResource(iconRes)
+        icon.imageTintList = ColorStateList.valueOf(iconTint)
+        icon.animate().cancel()
+        icon.alpha = 0f
+        val startScale = if (gentle) 0.9f else 0.6f
+        icon.scaleX = startScale
+        icon.scaleY = startScale
+        val duration = when {
+            gentle -> 200L
+            kind == DoorStatusKind.Success -> 420L
+            else -> 280L
+        }
+        val interpolator = if (!gentle && kind == DoorStatusKind.Success) overshoot else emphasized
+        icon.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(duration)
+            .setInterpolator(interpolator)
+            .start()
+
+        if (!gentle && kind == DoorStatusKind.Error) {
+            shakeView(views.statusIconContainer)
+        }
+    }
+
+    private fun applyIconBackground(target: Int, animate: Boolean) {
+        val drawable = views.statusIconContainer.background.mutate() as GradientDrawable
+        val from = currentIconBgColor
+        iconColorAnimator?.cancel()
+        if (animate && from != null && from != target) {
+            iconColorAnimator = ValueAnimator.ofObject(ArgbEvaluator(), from, target).apply {
+                duration = 280
+                addUpdateListener { drawable.setColor(it.animatedValue as Int) }
+                start()
+            }
+        } else {
+            drawable.setColor(target)
+        }
+        currentIconBgColor = target
+    }
+
+    private fun shakeView(view: View) {
+        ObjectAnimator.ofFloat(
+            view, View.TRANSLATION_X,
+            0f, dp(8).toFloat(), -dp(6).toFloat(), dp(4).toFloat(), 0f
+        ).apply {
+            duration = 340
+            start()
+        }
+    }
+
+    /** NFC 待机时让图标容器轻微“呼吸”，提示用户靠近门锁。 */
+    private fun updateIdlePulse(tab: MainTab, kind: DoorStatusKind) {
+        val shouldPulse = tab == MainTab.Nfc && kind == DoorStatusKind.Idle && hasCredential
+        if (shouldPulse) startPulse() else stopPulse()
+    }
+
+    private fun startPulse() {
+        if (pulseAnimator?.isStarted == true) return
+        val container = views.statusIconContainer
+        pulseAnimator = ValueAnimator.ofFloat(1f, 1.06f).apply {
+            duration = 1100
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener {
+                val scale = it.animatedValue as Float
+                container.scaleX = scale
+                container.scaleY = scale
+            }
+            start()
+        }
+    }
+
+    private fun stopPulse() {
+        pulseAnimator?.cancel()
+        pulseAnimator = null
+        views.statusIconContainer.scaleX = 1f
+        views.statusIconContainer.scaleY = 1f
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
+
+    private fun showConfigDialog() {
+        configDialog?.show()
+        if (configDialog != null) return
+
+        val dialogBinding = ConfigDialogViews(LayoutInflater.from(this).inflate(R.layout.dialog_config, null))
+        val snapshot = store.load()
+        dialogBinding.phoneInput.setText(snapshot?.phone.orEmpty())
+        dialogBinding.passwordInput.setText(snapshot?.password.orEmpty())
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogBinding.root)
+            .create()
+
+        dialog.setOnShowListener {
+            dialogBinding.cancelButton.setOnClickListener {
+                dialog.dismiss()
+            }
+            dialogBinding.syncButton.setOnClickListener {
+                val phone = dialogBinding.phoneInput.trimmedText()
+                val password = dialogBinding.passwordInput.trimmedText()
+                if (phone.isBlank() || password.isBlank()) {
+                    dialogBinding.errorMessage.text = getString(R.string.err_phn)
+                    dialogBinding.errorMessage.visibility = View.VISIBLE
+                    return@setOnClickListener
                 }
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = {
-                        if (phone.isBlank() || password.isBlank()) { errorMsg = "请输入手机号和密码"; return@Button }
-                        isLoading = true; errorMsg = null
-                        scope.launch {
-                            try {
-                                val snap = withContext(Dispatchers.IO) { DoorApi().syncCredential(phone, password) }
-                                store.save(snap); _hasCredential.value = true
-                                withContext(Dispatchers.Main) {
-                                    updateIdleStatus()   // 刷新两个 Tab 的空闲文案（账号/设备ID）
-                                    Toast.makeText(ctx, "同步成功", Toast.LENGTH_SHORT).show(); onDismiss()
-                                }
-                            } catch (e: Exception) { errorMsg = e.message ?: "同步失败" }
-                            finally { isLoading = false }
+
+                dialogBinding.errorMessage.visibility = View.GONE
+                setConfigDialogLoading(true)
+                Thread {
+                    try {
+                        val fresh = DoorApi().syncCredential(phone, password)
+                        store.save(fresh)
+                        runOnUiThread {
+                            hasCredential = true
+                            updateIdleStatus()
+                            Toast.makeText(this, getString(R.string.tst_syn), Toast.LENGTH_SHORT).show()
+                            dialog.dismiss()
                         }
-                    },
-                    enabled = !isLoading, modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary)
-                        Spacer(Modifier.width(8.dp))
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            dialogBinding.errorMessage.text = e.resolveMessage(this)
+                            dialogBinding.errorMessage.visibility = View.VISIBLE
+                            setConfigDialogLoading(false)
+                        }
                     }
-                    Text("同步门禁凭证")
-                }
+                }.start()
             }
+            setConfigDialogLoading(false)
+        }
+
+        dialog.setOnDismissListener {
+            configViews = null
+            configDialog = null
+        }
+
+        configViews = dialogBinding
+        configDialog = dialog
+        dialog.setCanceledOnTouchOutside(hasCredential)
+        dialog.setCancelable(hasCredential)
+        dialog.show()
+    }
+
+    private fun setConfigDialogLoading(loading: Boolean) {
+        val dialogBinding = configViews ?: return
+        dialogBinding.phoneInput.isEnabled = !loading
+        dialogBinding.passwordInput.isEnabled = !loading
+        dialogBinding.syncButton.isEnabled = !loading
+        dialogBinding.cancelButton.isEnabled = !loading && hasCredential
+    }
+
+    private fun setNfc(title: String, detail: String, kind: DoorStatusKind = DoorStatusKind.Idle) {
+        nfcState = StatusState(title = title, detail = detail, kind = kind)
+        if (selectedTab == MainTab.Nfc) {
+            renderCurrentState()
         }
     }
 
-    // ==================== Business Logic ====================
-
-    private fun setNfc(title: String, detail: String, color: Color = DefaultTextColor) {
-        _nfcTitle.value = title; _nfcDetail.value = detail; _nfcColor.value = color
+    private fun setBle(title: String, detail: String, kind: DoorStatusKind = DoorStatusKind.Idle) {
+        bleState = StatusState(title = title, detail = detail, kind = kind)
+        if (selectedTab == MainTab.Ble) {
+            renderCurrentState()
+        }
     }
 
-    private fun setBle(title: String, detail: String, color: Color = DefaultTextColor) {
-        _bleTitle.value = title; _bleDetail.value = detail; _bleColor.value = color
+    private fun setBusyState(value: Boolean) {
+        isBusyState = value
+        renderCurrentState()
+        configDialog?.let { setConfigDialogLoading(value) }
     }
 
     private fun updateIdleStatus() {
-        if (busy.get()) return   // 正在开门，不要覆盖进行中的状态
+        if (busy.get()) return
 
-        val s = store.load()
-        val account = s?.let { "\n账号: ${it.phone}\n设备ID: ${it.deviceId}" } ?: ""
+        val snapshot = store.load()
+        val account = snapshot?.let {
+            getString(R.string.dt_dev, it.phone, it.deviceId)
+        }.orEmpty()
 
-        // NFC tab
         when {
-            nfcAdapter == null -> setNfc("开门失败", "当前设备不支持NFC", ErrorColor)
-            nfcAdapter?.isEnabled != true -> setNfc("开门失败", "请先开启NFC", ErrorColor)
-            !_hasCredential.value -> setNfc("开门失败", "请先同步凭证", ErrorColor)
-            else -> setNfc("请靠近门锁", "离线开门模式：等待NFC标签$account")
+            nfcAdapter == null -> setNfc(
+                getString(R.string.st_fail),
+                getString(R.string.err_nfc),
+                DoorStatusKind.Error
+            )
+            nfcAdapter?.isEnabled != true -> setNfc(
+                getString(R.string.st_fail),
+                getString(R.string.err_nfc2),
+                DoorStatusKind.Error
+            )
+            !hasCredential -> setNfc(
+                getString(R.string.st_fail),
+                getString(R.string.err_syn),
+                DoorStatusKind.Error
+            )
+            else -> setNfc(
+                getString(R.string.st_hold),
+                getString(R.string.sd_nfc, account),
+                DoorStatusKind.Idle
+            )
         }
 
-        // 蓝牙 tab
-        if (!_hasCredential.value) setBle("蓝牙开门", "请先同步凭证", ErrorColor)
-        else setBle("蓝牙开门", "点击下方按钮开门$account")
+        if (!hasCredential) {
+            setBle(
+                getString(R.string.st_ble),
+                getString(R.string.err_syn),
+                DoorStatusKind.Error
+            )
+        } else {
+            setBle(
+                getString(R.string.st_ble),
+                getString(R.string.sd_tap, account),
+                DoorStatusKind.Idle
+            )
+        }
+
+        renderCurrentState()
     }
 
     /** 手动刷新凭证：用已存的账号密码重新同步（处理过期）。 */
     private fun refreshCredential() {
-        val snap = store.load()
-        if (snap == null || snap.phone.isBlank() || snap.password.isBlank()) {
-            _showConfigDialog.value = true
+        val snapshot = store.load()
+        if (snapshot == null || snapshot.phone.isBlank() || snapshot.password.isBlank()) {
+            showConfigDialog()
             return
         }
         if (!busy.compareAndSet(false, true)) return
-        _isBusy.value = true
-        setNfc("刷新凭证", "正在刷新…")
-        setBle("刷新凭证", "正在刷新…")
+
+        setBusyState(true)
+        setNfc(
+            getString(R.string.st_rfs),
+            getString(R.string.sd_rfrg),
+            DoorStatusKind.Busy
+        )
+        setBle(
+            getString(R.string.st_rfs),
+            getString(R.string.sd_rfrg),
+            DoorStatusKind.Busy
+        )
 
         Thread {
             try {
-                val fresh = DoorApi().syncCredential(snap.phone, snap.password)
+                val fresh = DoorApi().syncCredential(snapshot.phone, snapshot.password)
                 store.save(fresh)
                 runOnUiThread {
-                    _hasCredential.value = true
-                    Toast.makeText(this, "凭证已刷新", Toast.LENGTH_SHORT).show()
+                    hasCredential = true
+                    Toast.makeText(this, getString(R.string.tst_rfr), Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                runOnUiThread { Toast.makeText(this, "刷新失败：${e.message}", Toast.LENGTH_LONG).show() }
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.tst_rff, e.resolveMessage(this)),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             } finally {
                 busy.set(false)
-                runOnUiThread { _isBusy.value = false; updateIdleStatus() }
+                runOnUiThread {
+                    setBusyState(false)
+                    updateIdleStatus()
+                }
             }
         }.start()
     }
@@ -390,56 +609,96 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
         val action = intent.action ?: return
         if (action != NfcAdapter.ACTION_TAG_DISCOVERED &&
             action != NfcAdapter.ACTION_NDEF_DISCOVERED &&
-            action != NfcAdapter.ACTION_TECH_DISCOVERED) return
+            action != NfcAdapter.ACTION_TECH_DISCOVERED) {
+            return
+        }
 
         @Suppress("DEPRECATION")
-        val tag: Tag? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+        val tag: Tag? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableExtra(NfcAdapter.EXTRA_TAG, Tag::class.java)
-        else intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        } else {
+            intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        }
 
-        if (tag != null) handleTag(tag)
+        if (tag != null) {
+            handleTag(tag)
+        }
     }
 
     /** ReaderMode 回调在子线程触发，所有 UI 更新走 runOnUiThread。 */
     private fun handleTag(tag: Tag) {
-        if (!_hasCredential.value) {
-            runOnUiThread { setNfc("开门失败", "请先同步凭证", ErrorColor); _showConfigDialog.value = true }
+        if (!hasCredential) {
+            runOnUiThread {
+                setNfc(
+                    getString(R.string.st_fail),
+                    getString(R.string.err_syn),
+                    DoorStatusKind.Error
+                )
+                showConfigDialog()
+            }
             return
         }
+
         if (!busy.compareAndSet(false, true)) {
-            runOnUiThread { setNfc("请靠近门锁", "正在处理，请稍候") }
+            runOnUiThread {
+                setNfc(
+                    getString(R.string.st_hold),
+                    getString(R.string.sd_wait),
+                    DoorStatusKind.Busy
+                )
+            }
             return
         }
+
         val snapshot = store.load() ?: run {
             busy.set(false)
-            runOnUiThread { setNfc("开门失败", "凭证不可用", ErrorColor); _showConfigDialog.value = true }
+            runOnUiThread {
+                setNfc(
+                    getString(R.string.st_fail),
+                    getString(R.string.err_crd),
+                    DoorStatusKind.Error
+                )
+                showConfigDialog()
+            }
             return
         }
 
         runOnUiThread {
-            _isBusy.value = true
-            setNfc("请靠近门锁", "UID: ${tag.id.hex()}\n正在读取标签")
+            setBusyState(true)
+            setNfc(
+                getString(R.string.st_hold),
+                getString(R.string.sd_tag, tag.id.toHexCompact()),
+                DoorStatusKind.Busy
+            )
         }
 
         Thread {
             try {
                 val result = processDoorTag(tag, snapshot)
                 runOnUiThread {
-                    setNfc(result.title, result.details, if (result.success) SuccessColor else ErrorColor)
+                    setNfc(
+                        result.title,
+                        result.details,
+                        if (result.success) DoorStatusKind.Success else DoorStatusKind.Error
+                    )
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    setNfc("开门失败", "${e.message}\nUID: ${tag.id.hex()}", ErrorColor)
+                    setNfc(
+                        getString(R.string.st_fail),
+                        getString(R.string.sd_tag, tag.id.toHexCompact()) + "\n" + e.resolveMessage(this),
+                        DoorStatusKind.Error
+                    )
                 }
             } finally {
                 busy.set(false)
-                runOnUiThread { _isBusy.value = false }
+                runOnUiThread { setBusyState(false) }
             }
         }.start()
     }
 
     private fun processDoorTag(tag: Tag, snapshot: DoorCredentialSnapshot): DoorOpenResult {
-        val uid = tag.id.hex()
+        val uid = tag.id.toHexCompact()
         DoorNfcHelper.clearDebug()
         DoorNfcHelper.appendDebug("开始NFC开门 uid=$uid")
         try {
@@ -449,26 +708,56 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
             DoorNfcHelper.flushDebug(uid, this)
 
             if (decoded.isSuccess) {
-                return DoorOpenResult(true, "开门成功", uid,
-                    "结果: ${decoded.resultMessage}\n设备ID: ${outcome.deviceId}\nUID: $uid")
+                return DoorOpenResult(
+                    true,
+                    getString(R.string.st_ok),
+                    uid,
+                    getString(
+                        R.string.sd_res,
+                        decoded.resultMessageResId.resolve(this),
+                        outcome.deviceId,
+                        uid
+                    )
+                )
             }
 
-            // 离线凭证过期/需更新：用存的账号密码自动重新同步，之后再贴一次即可
             if (decoded.resultCode in CREDENTIAL_REFRESH_CODES &&
                 snapshot.phone.isNotBlank() && snapshot.password.isNotBlank()) {
                 return try {
                     val fresh = DoorApi().syncCredential(snapshot.phone, snapshot.password)
                     store.save(fresh)
-                    DoorOpenResult(false, "凭证已刷新", uid,
-                        "原凭证${decoded.resultMessage}，已自动刷新\n请再贴一次卡开门")
+                    DoorOpenResult(
+                        false,
+                        getString(R.string.st_crd),
+                        uid,
+                        rawText("原凭证 %1\$s，已自动刷新\n请再贴一次卡开门",
+                            decoded.resultMessageResId.resolve(this)
+                        ).resolve(this)
+                    )
                 } catch (e: Exception) {
-                    DoorOpenResult(false, "开门失败", uid,
-                        "凭证${decoded.resultMessage}，自动刷新失败：${e.message}")
+                    DoorOpenResult(
+                        false,
+                        getString(R.string.st_fail),
+                        uid,
+                        rawText("凭证 %1\$s，自动刷新失败：%2\$s",
+                            decoded.resultMessageResId.resolve(this),
+                            e.resolveMessage(this)
+                        ).resolve(this)
+                    )
                 }
             }
 
-            return DoorOpenResult(false, "开门失败", uid,
-                "结果: ${decoded.resultMessage}\n设备ID: ${outcome.deviceId}\nUID: $uid")
+            return DoorOpenResult(
+                false,
+                getString(R.string.st_fail),
+                uid,
+                getString(
+                    R.string.sd_res,
+                    decoded.resultMessageResId.resolve(this),
+                    outcome.deviceId,
+                    uid
+                )
+            )
         } catch (e: Exception) {
             DoorNfcHelper.appendDebug("异常: ${e.javaClass.simpleName}: ${e.message}")
             DoorNfcHelper.flushDebug(uid, this)
@@ -477,39 +766,110 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
     }
 
     private fun startBleOpen() {
-        if (busy.get()) { setBle("蓝牙开门", "正在处理"); return }
-        val snapshot = store.load() ?: run {
-            setBle("开门失败", "请先同步凭证", ErrorColor); _showConfigDialog.value = true; return
+        if (busy.get()) {
+            setBle(
+                getString(R.string.st_ble),
+                getString(R.string.sd_proc),
+                DoorStatusKind.Busy
+            )
+            return
         }
 
-        val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-            listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        val missing = perms.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) { pendingBleOpen = true; blePermissionLauncher.launch(missing.toTypedArray()); return }
+        val snapshot = store.load() ?: run {
+            setBle(
+                getString(R.string.st_fail),
+                getString(R.string.err_syn),
+                DoorStatusKind.Error
+            )
+            showConfigDialog()
+            return
+        }
 
-        if (!busy.compareAndSet(false, true)) { setBle("蓝牙开门", "正在处理"); return }
-        _isBusy.value = true; setBle("蓝牙开门", "正在准备蓝牙开门")
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        val missing = permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            pendingBleOpen = true
+            requestPermissions(missing.toTypedArray(), REQ_BLE_PERMS)
+            return
+        }
+
+        if (!busy.compareAndSet(false, true)) {
+            setBle(
+                getString(R.string.st_ble),
+                getString(R.string.sd_proc),
+                DoorStatusKind.Busy
+            )
+            return
+        }
+
+        setBusyState(true)
+        setBle(
+            getString(R.string.st_ble),
+            getString(R.string.sd_prep),
+            DoorStatusKind.Busy
+        )
 
         Thread {
             try {
-                val result = DoorBle.openDoor(this, snapshot) { runOnUiThread { setBle("蓝牙开门", it) } }
+                val result = DoorBle.openDoor(this, snapshot) {
+                    runOnUiThread {
+                        setBle(getString(R.string.st_ble), it, DoorStatusKind.Busy)
+                    }
+                }
                 result.updatedCredentialHex?.let { store.updateCredential(it) }
                 runOnUiThread {
+                    val noteSuffix = result.note?.let { getString(R.string.dt_nop, it) }.orEmpty()
                     setBle(
-                        if (result.success) "开门成功" else "开门失败",
-                        "设备: ${result.deviceName}\n地址: ${result.deviceAddress}\n结果: ${result.resultCode} - ${result.resultMessage}" +
-                            (result.note?.let { "\n$it" } ?: ""),
-                        if (result.success) SuccessColor else ErrorColor
+                        if (result.success) getString(R.string.st_ok) else getString(R.string.st_fail),
+                        getString(
+                            R.string.sd_bler,
+                            result.deviceName,
+                            result.deviceAddress,
+                            result.resultCode,
+                            result.resultMessage,
+                            noteSuffix
+                        ),
+                        if (result.success) DoorStatusKind.Success else DoorStatusKind.Error
                     )
                 }
             } catch (e: Exception) {
-                runOnUiThread { setBle("开门失败", e.message ?: "未知错误", ErrorColor) }
-            } finally { busy.set(false); _isBusy.value = false }
+                runOnUiThread {
+                    setBle(
+                        getString(R.string.st_fail),
+                        e.resolveMessage(this),
+                        DoorStatusKind.Error
+                    )
+                }
+            } finally {
+                busy.set(false)
+                runOnUiThread { setBusyState(false) }
+            }
         }.start()
     }
 
-    private fun ByteArray.hex() = joinToString("") { "%02X".format(it) }
+    private fun resolveColor(colorResId: Int): Int {
+        return getColor(colorResId)
+    }
+
+    private fun readSavedTab(): MainTab {
+        val saved = prefs.getString(PREF_LAST_TAB, MainTab.Nfc.name)
+        return MainTab.values().firstOrNull { it.name == saved } ?: MainTab.Nfc
+    }
+
+    private fun EditText.trimmedText(): String {
+        return text?.toString()?.trim().orEmpty()
+    }
+
+    private fun Throwable.resolveMessage(context: MainActivity): String {
+        return when (this) {
+            is LocalizedMessage -> resolveMessage(context)
+            else -> message ?: context.getString(R.string.err_unk)
+        }
+    }
 }
 
 data class DoorOpenResult(val success: Boolean, val title: String, val uid: String, val details: String)

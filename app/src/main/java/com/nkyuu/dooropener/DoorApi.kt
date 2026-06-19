@@ -47,7 +47,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         var credential = findString(detailDoorLock ?: detailData, "credential", "chain_key", "chainKey")
 
         if (deviceId.isNullOrBlank()) {
-            throw DoorApiException("未从服务器返回中找到 device_id")
+            throw DoorApiException(rawText("服务器返回中缺少 device_id"))
         }
 
         if (credential.isNullOrBlank()) {
@@ -68,11 +68,11 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         }
 
         val deviceIdInt = deviceId.toIntOrNull()
-            ?: throw DoorApiException("device_id 不是合法整数: $deviceId")
+            ?: throw DoorApiException(rawText("device_id 不是合法整数: $deviceId"))
         val normalizedCredential = credential
             ?.uppercase()
             ?.takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
-            ?: throw DoorApiException("服务器返回的 credential 无效")
+            ?: throw DoorApiException(rawText("服务器返回的凭证无效"))
 
         return DoorCredentialSnapshot(
             serverUrl = normalizeServerUrl(serverAddr),
@@ -91,11 +91,6 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 
     fun fetchActivationPayload(snapshot: DoorCredentialSnapshot, deviceId: Int): ByteArray {
-        require(snapshot.userId.isNotBlank()) { "缺少 user_id，请先同步凭证" }
-        require(snapshot.identityCode.isNotBlank()) { "缺少 identitycode，请先同步凭证" }
-        require(snapshot.credentialId.isNotBlank()) { "缺少 credential_id，请先同步凭证" }
-        require(snapshot.sessionSecret.isNotBlank()) { "缺少业务签名密钥，请重新同步凭证" }
-
         val data = businessGet(
             baseUrl = snapshot.serverUrl,
             sessionSecret = snapshot.sessionSecret,
@@ -114,7 +109,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             is String -> data.trim()
             else -> findString(data, "payload")
         }?.uppercase()?.takeIf { it.matches(Regex("^[0-9A-F]+$")) && it.length % 2 == 0 }
-            ?: throw DoorApiException("服务器未返回合法的激活 payload")
+            ?: throw DoorApiException(rawText("服务器未返回合法的激活数据"))
 
         return payloadHex.hexToBytes()
     }
@@ -204,21 +199,24 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             ?.readAllText()
             .orEmpty()
         if (body.isBlank()) {
-            throw DoorApiException("服务器返回空响应 (HTTP $statusCode)")
+            throw DoorApiException(rawText("服务器返回空响应 (HTTP %1\$s)", statusCode))
         }
 
         val root = try {
             JSONObject(body)
         } catch (exception: Exception) {
-            throw DoorApiException("服务器返回不是合法JSON: $body")
+            throw DoorApiException(rawText("服务器返回非法 JSON: %1\$s", body))
         }
 
         if (!isSuccess(root)) {
+            val serverMessage = root.optString("err_msg")
+                .ifBlank { root.optString("msg") }
+                .ifBlank { root.optString("message") }
             throw DoorApiException(
-                root.optString("err_msg")
-                    .ifBlank { root.optString("msg") }
-                    .ifBlank { root.optString("message") }
-                    .ifBlank { "服务器返回失败: HTTP $statusCode" }
+                serverMessage
+                    .takeIf { it.isNotBlank() }
+                    ?.let { rawText(it) }
+                    ?: rawText("服务器返回失败: HTTP %1\$s", statusCode)
             )
         }
 
@@ -278,7 +276,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
     private fun requireString(data: Any, vararg keys: String): String {
         return findString(data, *keys)?.takeIf { it.isNotBlank() }
-            ?: throw DoorApiException("服务器返回缺少字段: ${keys.joinToString("/")}")
+            ?: throw DoorApiException(rawText("服务器返回缺少字段: %1\$s", keys.joinToString("/")))
     }
 
     private fun findChildObject(node: Any, key: String): JSONObject? {
@@ -381,10 +379,6 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         return URLEncoder.encode(this, "UTF-8")
     }
 
-    private fun String.hexToBytes(): ByteArray {
-        return chunked(2).map { chunk -> chunk.toInt(16).toByte() }.toByteArray()
-    }
-
     companion object {
         const val DEFAULT_AUTH_SERVER_URL = "https://pm.whxinna.com"
         const val DEFAULT_SERVER_URL = "https://zhuli104.whxinna.com"
@@ -403,4 +397,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 }
 
-class DoorApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
+class DoorApiException(
+    private val text: TextValue,
+    cause: Throwable? = null
+) : LocalizedIOException(text, cause)

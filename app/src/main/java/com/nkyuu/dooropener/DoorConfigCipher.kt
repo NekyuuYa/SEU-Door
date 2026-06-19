@@ -21,7 +21,9 @@ class DoorConfigCipher {
 
     fun decrypt(encodedPayload: String): String {
         val raw = Base64.decode(encodedPayload, Base64.DEFAULT)
-        require(raw.size > IV_LENGTH_BYTES) { "本地配置数据损坏" }
+        if (raw.size <= IV_LENGTH_BYTES) {
+            throw LocalizedIOException(rawText("本地配置数据损坏"))
+        }
 
         val iv = raw.copyOfRange(0, IV_LENGTH_BYTES)
         val encrypted = raw.copyOfRange(IV_LENGTH_BYTES, raw.size)

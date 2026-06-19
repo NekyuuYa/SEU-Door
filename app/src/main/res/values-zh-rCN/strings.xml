@@ -1,0 +1,53 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="act_rfs">刷新凭证</string>
+    <string name="act_set">配置</string>
+    <string name="app_name">SEU Door</string>
+    <string name="bl_nrby">附近设备:</string>
+    <string name="bl_on">请先开启蓝牙</string>
+    <string name="bl_perm">缺少蓝牙权限</string>
+    <string name="btn_ble">蓝牙开门</string>
+    <string name="btn_syn">同步门禁凭证</string>
+    <string name="cfg_hnt">手机号和密码只用于同步本地离线凭证，供 NFC 和蓝牙开门使用。</string>
+    <string name="dlg_cfg">配置门禁账号</string>
+    <string name="drBusy">设备已被占用</string>
+    <string name="dr_ok">开门成功</string>
+    <string name="dt_dev">
+账号: %1$s
+设备ID: %2$d</string>
+    <string name="dt_nop">
+%1$s</string>
+    <string name="err_crd">凭证不可用</string>
+    <string name="err_nfc">当前设备不支持NFC</string>
+    <string name="err_nfc2">请先开启NFC</string>
+    <string name="err_phn">请输入手机号和密码</string>
+    <string name="err_syn">请先同步凭证</string>
+    <string name="err_unk">未知错误</string>
+    <string name="fld_phn">手机号</string>
+    <string name="fld_pwd">密码</string>
+    <string name="sd_bler">设备: %1$s
+地址: %2$s
+结果: %3$d - %4$s%5$s</string>
+    <string name="sd_nfc">离线开门模式：等待NFC标签%1$s</string>
+    <string name="sd_prep">正在准备蓝牙开门</string>
+    <string name="sd_proc">正在处理</string>
+    <string name="sd_res">结果: %1$s
+设备ID: %2$d
+UID: %3$s</string>
+    <string name="sd_rfrg">正在刷新…</string>
+    <string name="sd_tag">UID: %1$s
+正在读取标签</string>
+    <string name="sd_tap">点击下方按钮开门%1$s</string>
+    <string name="sd_wait">正在处理，请稍候</string>
+    <string name="st_ble">蓝牙开门</string>
+    <string name="st_crd">凭证已刷新</string>
+    <string name="st_fail">开门失败</string>
+    <string name="st_hold">请靠近门锁</string>
+    <string name="st_ok">开门成功</string>
+    <string name="st_rfs">刷新凭证</string>
+    <string name="tab_ble">蓝牙</string>
+    <string name="tab_nfc">NFC</string>
+    <string name="tst_rff">刷新失败：%1$s</string>
+    <string name="tst_rfr">凭证已刷新</string>
+    <string name="tst_syn">同步成功</string>
+</resources>

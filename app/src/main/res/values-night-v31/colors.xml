@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material You dynamic color (Android 12+), dark. Falls back to the
+     baseline dark scheme in values-night/colors.xml for any role not listed. -->
+<resources>
+    <color name="color_primary">@android:color/system_accent1_200</color>
+    <color name="color_primary_container">@android:color/system_accent1_700</color>
+    <color name="color_on_secondary_container">@android:color/system_accent2_100</color>
+
+    <color name="color_surface">@android:color/system_neutral1_900</color>
+    <color name="color_surface_card">@android:color/system_neutral1_800</color>
+    <color name="color_surface_container">@android:color/system_neutral1_800</color>
+    <color name="color_surface_dialog">@android:color/system_neutral1_700</color>
+    <color name="color_surface_input">@android:color/system_neutral2_700</color>
+    <color name="color_tab_selected_bg">@android:color/system_accent2_700</color>
+    <color name="color_on_surface">@android:color/system_neutral1_100</color>
+    <color name="color_on_surface_variant">@android:color/system_neutral2_200</color>
+    <color name="color_outline">@android:color/system_neutral2_400</color>
+    <color name="color_outline_variant">@android:color/system_neutral2_700</color>
+
+    <color name="button_primary_text">@android:color/system_accent1_800</color>
+</resources>

@@ -1,5 +1,6 @@
 package com.nkyuu.dooropener
 
+import android.content.Context
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -38,31 +39,31 @@ object DoorCrypto {
         1
     )
 
-    private val ERROR_MESSAGES = mapOf(
-        0 to "开门成功",
-        1 to "数据CRC校验错误",
-        2 to "ISN随机数错误",
-        3 to "设备已被占用",
-        4 to "保存消费数据到Flash失败",
-        5 to "没有历史账单",
-        6 to "无流量关阀/推送账单",
-        7 to "没有设置密钥",
-        12 to "用户已删除",
-        13 to "随机数校验失败",
-        14 to "项目ID不一致",
-        16 to "生成随机密钥失败",
-        17 to "用户凭证保存失败",
-        18 to "开锁交换密钥失败",
-        19 to "解密随机密钥失败",
-        20 to "未找到用户信息",
-        21 to "钥匙类型不匹配",
-        22 to "管理员随机数不匹配",
-        23 to "门锁状态已打开",
-        24 to "已过有效期",
-        25 to "离线次数已用完",
-        26 to "用户凭证更新失败",
-        27 to "需要更新开锁密钥",
-        255 to "未知命令"
+    private val ERROR_MESSAGE_RES = mapOf(
+        0 to resText(R.string.dr_ok),
+        1 to rawText("数据CRC校验错误"),
+        2 to rawText("ISN随机数错误"),
+        3 to resText(R.string.drBusy),
+        4 to rawText("未知错误"),
+        5 to rawText("未知错误"),
+        6 to rawText("未知错误"),
+        7 to rawText("没有设置密钥"),
+        12 to rawText("用户已删除"),
+        13 to rawText("随机数校验失败"),
+        14 to rawText("项目 ID 不一致"),
+        16 to rawText("生成随机密钥失败"),
+        17 to rawText("用户凭证保存失败"),
+        18 to rawText("开锁交换密钥失败"),
+        19 to rawText("解密随机密钥失败"),
+        20 to rawText("未找到用户信息"),
+        21 to rawText("钥匙类型不匹配"),
+        22 to rawText("管理员随机数不匹配"),
+        23 to rawText("门锁状态已打开"),
+        24 to rawText("已过有效期"),
+        25 to rawText("离线次数已用完"),
+        26 to rawText("用户凭证更新失败"),
+        27 to rawText("需要更新开锁密钥"),
+        255 to rawText("未知命令")
     )
 
     fun deriveKey(deviceId: Int): ByteArray {
@@ -131,7 +132,6 @@ object DoorCrypto {
 
     fun buildNfcCommand(deviceId: Int, credentialHex: String, projectId: Int): ByteArray {
         val credential = credentialHex.hexToBytes()
-        require(credential.size == 32) { "credential 必须是32字节" }
 
         val pidBytes = ByteBuffer.allocate(4)
             .order(ByteOrder.LITTLE_ENDIAN)
@@ -168,7 +168,6 @@ object DoorCrypto {
 
     fun buildBleHeaderPayload(projectId: Int, credentialHex: String): ByteArray {
         val credential = credentialHex.hexToBytes()
-        require(credential.size == 32) { "credential 必须是32字节" }
 
         val pidBytes = littleEndianInt(projectId)
         val raw = pidBytes + credential
@@ -182,7 +181,6 @@ object DoorCrypto {
 
     fun buildBleCredentialPackets(projectId: Int, credentialHex: String, ran: Int): List<ByteArray> {
         val credential = credentialHex.hexToBytes()
-        require(credential.size == 32) { "credential 必须是32字节, 实际=${credential.size}" }
 
         val payload = littleEndianInt(ran) + littleEndianInt(projectId) + credential
         return payload.asBleChunks()
@@ -230,12 +228,16 @@ object DoorCrypto {
         )
     }
 
-    fun describeResultCode(code: Int): String {
-        return ERROR_MESSAGES[code] ?: "未知错误"
+    fun describeResultCodeRes(code: Int): TextValue {
+        return ERROR_MESSAGE_RES[code] ?: rawText("未知错误")
+    }
+
+    fun describeResultCode(context: Context, code: Int): String {
+        return describeResultCodeRes(code).resolve(context)
     }
 
     fun isKnownResultCode(code: Int): Boolean {
-        return ERROR_MESSAGES.containsKey(code)
+        return ERROR_MESSAGE_RES.containsKey(code)
     }
 
     fun parseResponse(deviceId: Int, frame: ByteArray): DoorResponse {
@@ -263,27 +265,14 @@ object DoorCrypto {
             payloadSize = payloadSize,
             frameSize = frameSize,
             resultCode = resultCode,
-            resultMessage = ERROR_MESSAGES[resultCode] ?: "未知错误",
+            resultMessageResId = describeResultCodeRes(resultCode),
             crcValid = receivedCrc == calculatedCrc,
             updatedCredentialHex = updatedCredentialHex,
             isSuccess = isSuccess
         )
     }
 
-    private fun String.hexToBytes(): ByteArray {
-        require(length % 2 == 0) { "HEX字符串长度必须为偶数" }
-        return chunked(2).map { chunk ->
-            chunk.toInt(16).toByte()
-        }.toByteArray()
-    }
 
-    private fun ByteArray.toHexCompact(): String {
-        return joinToString("") { byte -> "%02X".format(byte.toInt() and 0xFF) }
-    }
-
-    private fun Byte.toHexByte(): String {
-        return "%02X".format(toInt() and 0xFF)
-    }
 
     private fun IntArray.swap(first: Int, second: Int) {
         val temp = this[first]
@@ -361,7 +350,7 @@ data class DoorResponse(
     val payloadSize: Int,
     val frameSize: Int,
     val resultCode: Int,
-    val resultMessage: String,
+    val resultMessageResId: TextValue,
     val crcValid: Boolean?,
     val updatedCredentialHex: String?,
     val isSuccess: Boolean

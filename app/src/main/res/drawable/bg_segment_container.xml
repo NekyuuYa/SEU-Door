@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M3 segmented button track: stadium outline over the surface. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <corners android:radius="100dp" />
+    <solid android:color="@color/color_surface_container" />
+    <stroke android:width="1dp" android:color="@color/color_outline_variant" />
+</shape>

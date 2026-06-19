@@ -66,7 +66,7 @@ class DoorConfigStore(context: Context) {
         val credential = json.optString(KEY_CREDENTIAL)
             .uppercase()
             .takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
-            ?: throw IllegalStateException("本地 credential 无效")
+            ?: throw LocalizedIOException(rawText("本地凭证无效"))
 
         return DoorCredentialSnapshot(
             serverUrl = json.optString(KEY_SERVER_URL, DoorApi.DEFAULT_SERVER_URL),

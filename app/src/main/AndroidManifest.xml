@@ -16,7 +16,7 @@
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="SEU Door"
+        android:label="@string/app_name"
         android:theme="@style/Theme.DoorOpener">
 
         <activity

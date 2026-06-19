@@ -25,11 +25,11 @@ object DoorNfcHelper {
     )
 
     fun readNdefMessage(tag: Tag): NdefMessage {
-        val ndef = Ndef.get(tag) ?: throw IOException("标签不支持NDEF")
+        val ndef = Ndef.get(tag) ?: throw LocalizedIOException(rawText("标签不支持 NDEF"))
         try {
             ndef.connect()
             return ndef.cachedNdefMessage ?: ndef.ndefMessage
-                ?: throw IOException("标签里没有NDEF数据")
+                ?: throw LocalizedIOException(rawText("标签里没有 NDEF 数据"))
         } finally {
             try { ndef.close() } catch (_: Exception) {}
         }
@@ -76,9 +76,9 @@ object DoorNfcHelper {
             // 1) 读用户内存，解析 NDEF → device_id
             val userMem = DoorNfc.readBytes(nfcA, 4, DoorNfc.DEFAULT_USER_BYTES)
             val ndefMsgBytes = extractNdefMessageBytes(userMem)
-                ?: throw IOException("标签里没有NDEF数据")
-            val url = findDoorUrl(NdefMessage(ndefMsgBytes)) ?: throw IOException("标签中无门锁URL")
-            val devId = extractDeviceId(url) ?: throw IOException("URL中无设备ID")
+                ?: throw LocalizedIOException(rawText("标签里没有 NDEF 数据"))
+            val url = findDoorUrl(NdefMessage(ndefMsgBytes)) ?: throw LocalizedIOException(rawText("标签中无门锁 URL"))
+            val devId = extractDeviceId(url) ?: throw LocalizedIOException(rawText("URL 中无设备 ID"))
 
             // 2) 整条命令一次 transceive，门锁直接回响应
             val command = DoorCrypto.buildNfcCommand(devId, credentialHex, projectId)
@@ -99,7 +99,7 @@ object DoorNfcHelper {
                 }
                 SystemClock.sleep(80)
             }
-            throw lastErr ?: IOException("门锁未返回有效响应")
+            throw lastErr ?: LocalizedIOException(rawText("门锁未返回有效响应"))
         }
     }
 
@@ -160,14 +160,6 @@ object DoorNfcHelper {
     }
 
     fun clearDebug() { debugLog.clear() }
-
-    fun ByteArray.toHexString(): String {
-        return joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xFF) }
-    }
-
-    fun ByteArray.toHexCompact(): String {
-        return joinToString("") { byte -> "%02X".format(byte.toInt() and 0xFF) }
-    }
 
     private fun decodeRecordPayload(record: NdefRecord): String {
         if (record.tnf == NdefRecord.TNF_WELL_KNOWN && record.type.contentEquals(NdefRecord.RTD_URI)) {

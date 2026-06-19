@@ -7,10 +7,7 @@ import java.io.IOException
 object DoorNfc {
 
     const val COMMAND_SIZE = 40
-    const val COMMAND_PAGE_COUNT = 10
     const val DEFAULT_USER_BYTES = 144
-    const val RESPONSE_TIMEOUT_MS = 4000L
-    const val RESPONSE_POLL_INTERVAL_MS = 180L
 
     private const val PAGE_SIZE = 4
     private const val USER_DATA_START_PAGE = 4
@@ -28,7 +25,7 @@ object DoorNfc {
         }
         val fallback = lastUserPage - pageCount + 1
         if (fallback < USER_DATA_START_PAGE) {
-            throw IOException("标签空间不足，无法写入${byteCount}字节数据")
+            throw LocalizedIOException(rawText("标签空间不足，无法写入 %1\$s 字节", byteCount))
         }
         return fallback
     }
@@ -43,7 +40,7 @@ object DoorNfc {
         val lastUserPage = USER_DATA_START_PAGE + ((maxUserBytes + PAGE_SIZE - 1) / PAGE_SIZE) - 1
         val pageCount = byteCount.toPageCount()
         if (suggestedStartPage + pageCount - 1 > lastUserPage) {
-            throw IOException("标签空间不足，无法写入${byteCount}字节数据")
+            throw LocalizedIOException(rawText("标签空间不足，无法写入 %1\$s 字节", byteCount))
         }
 
         val readableBytes = (lastUserPage - suggestedStartPage + 1) * PAGE_SIZE
@@ -57,11 +54,11 @@ object DoorNfc {
             return suggestedStartPage
         }
 
-        throw IOException("未找到可写入的空闲标签区域")
+        throw LocalizedIOException(rawText("未找到可写入的空闲标签区域"))
     }
 
     fun <T> withNfcA(tag: Tag, block: (NfcA) -> T): T {
-        val nfcA = NfcA.get(tag) ?: throw IOException("标签不支持NfcA")
+        val nfcA = NfcA.get(tag) ?: throw LocalizedIOException(rawText("标签不支持 NfcA"))
         try {
             nfcA.connect()
             nfcA.timeout = TIMEOUT_MS
@@ -93,7 +90,7 @@ object DoorNfc {
                 )
             )
             if (response.isEmpty() || response[0] != 0x0A.toByte()) {
-                throw IOException("写入 page $page 失败")
+                throw LocalizedIOException(rawText("写入 page %1\$s 失败", page))
             }
         }
     }
@@ -104,7 +101,7 @@ object DoorNfc {
         while (result.size < byteCount) {
             val block = nfcA.transceive(byteArrayOf(0x30, currentPage.toByte()))
             if (block.size < READ_BLOCK_PAGES * PAGE_SIZE) {
-                throw IOException("读取 page $currentPage 返回数据过短")
+                throw LocalizedIOException(rawText("读取 page %1\$s 返回数据过短", currentPage))
             }
             block.forEach { result.add(it) }
             currentPage += READ_BLOCK_PAGES

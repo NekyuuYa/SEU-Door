@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material You dynamic color (Android 12+), light. Falls back to the
+     baseline scheme in values/colors.xml for any role not listed here. -->
+<resources>
+    <color name="color_primary">@android:color/system_accent1_600</color>
+    <color name="color_primary_container">@android:color/system_accent1_100</color>
+    <color name="color_on_secondary_container">@android:color/system_accent2_900</color>
+
+    <color name="color_surface">@android:color/system_neutral1_10</color>
+    <color name="color_surface_card">@android:color/system_neutral1_0</color>
+    <color name="color_surface_container">@android:color/system_neutral2_100</color>
+    <color name="color_surface_dialog">@android:color/system_neutral2_100</color>
+    <color name="color_surface_input">@android:color/system_neutral1_0</color>
+    <color name="color_tab_selected_bg">@android:color/system_accent2_100</color>
+    <color name="color_on_surface">@android:color/system_neutral1_900</color>
+    <color name="color_on_surface_variant">@android:color/system_neutral2_700</color>
+    <color name="color_outline">@android:color/system_neutral2_500</color>
+    <color name="color_outline_variant">@android:color/system_neutral2_300</color>
+
+    <color name="button_primary_text">@android:color/system_accent1_0</color>
+</resources>
