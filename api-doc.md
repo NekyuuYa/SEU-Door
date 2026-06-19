@@ -119,6 +119,8 @@ GET https://pm.whxinna.com/webapi/users/get_login_code
 
 `codeImg` 为 **SVG 字符串**（非 base64），直接嵌入即可显示。内容为 4 位字母数字验证码（含大小写）。用户输入后作为 `code` 参数传入登录接口。
 
+> **注意**: 响应 `data` 的 base64 padding 不固定，解码时需尝试补 `=`。`codeImg` 的 SVG 内部可能含二进制路径数据，用正则提取 `<text>` 元素或直接渲染为图片展示。
+
 ---
 
 ### 2. 获取门锁信息
