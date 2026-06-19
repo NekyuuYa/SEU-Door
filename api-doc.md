@@ -113,11 +113,11 @@ GET https://pm.whxinna.com/webapi/users/get_login_code
 
 ```json
 {
-  "codeImg": "base64 编码的 PNG 图片"
+  "codeImg": "<svg ...>...</svg>"
 }
 ```
 
-图片内容为 4 位数字验证码。用户输入后作为 `code` 参数传入登录接口。
+`codeImg` 为 **SVG 字符串**（非 base64），直接嵌入即可显示。内容为 4 位字母数字验证码（含大小写）。用户输入后作为 `code` 参数传入登录接口。
 
 ---
 
