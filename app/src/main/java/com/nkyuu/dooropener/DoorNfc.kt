@@ -33,7 +33,13 @@ object DoorNfc {
         return fallback
     }
 
-    fun findWritableStartPage(nfcA: NfcA, suggestedStartPage: Int, maxUserBytes: Int, byteCount: Int): Int {
+    fun findWritableStartPage(
+        nfcA: NfcA,
+        suggestedStartPage: Int,
+        maxUserBytes: Int,
+        byteCount: Int,
+        allowReuseExisting: Boolean = false
+    ): Int {
         val lastUserPage = USER_DATA_START_PAGE + ((maxUserBytes + PAGE_SIZE - 1) / PAGE_SIZE) - 1
         val pageCount = byteCount.toPageCount()
         if (suggestedStartPage + pageCount - 1 > lastUserPage) {
@@ -43,11 +49,15 @@ object DoorNfc {
         val readableBytes = (lastUserPage - suggestedStartPage + 1) * PAGE_SIZE
         val bytes = readBytes(nfcA, suggestedStartPage, readableBytes)
         val freeOffset = findFreeWindow(bytes, byteCount)
-        return if (freeOffset >= 0) {
-            suggestedStartPage + (freeOffset / PAGE_SIZE)
-        } else {
-            suggestedStartPage
+        if (freeOffset >= 0) {
+            return suggestedStartPage + (freeOffset / PAGE_SIZE)
         }
+
+        if (allowReuseExisting && looksLikeDoorFrame(bytes, byteCount)) {
+            return suggestedStartPage
+        }
+
+        throw IOException("未找到可写入的空闲标签区域")
     }
 
     fun <T> withNfcA(tag: Tag, block: (NfcA) -> T): T {
@@ -121,6 +131,18 @@ object DoorNfc {
             }
         }
         return -1
+    }
+
+    private fun looksLikeDoorFrame(bytes: ByteArray, byteCount: Int): Boolean {
+        if (bytes.size < 4 || byteCount < 4) {
+            return false
+        }
+        if (bytes[0] != 0xB1.toByte()) {
+            return false
+        }
+        val payloadSize = bytes[2].toInt() and 0xFF
+        val frameSize = 3 + payloadSize + 1
+        return frameSize in 4..byteCount
     }
 
     private fun Int.toPageCount(): Int {

@@ -6,7 +6,12 @@ import java.nio.ByteOrder
 object DoorCrypto {
 
     const val FRAME_HEADER: Byte = 0xB1.toByte()
+    const val BLE_FRAME_SIZE = 20
+    const val BLE_DATA_SIZE = 16
     private const val NFC_SUBCOMMAND: Byte = 0x0D
+    private const val BLE_LENGTH_MARKER: Byte = 20
+    private const val BLE_RESERVED: Byte = 0
+    private const val BLE_HEADER_TOTAL_LENGTH = 40
     private const val UINT_MASK = 0xFFFF_FFFFL
     private const val NFC_FRAME_HEADER_SIZE = 3
     private const val NFC_FRAME_CRC_SIZE = 1
@@ -144,6 +149,95 @@ object DoorCrypto {
         return command
     }
 
+    fun buildBleCommand(deviceId: Int, commandType: Int, data: ByteArray): ByteArray {
+        require(commandType in 0..0xFF) { "非法 BLE 命令类型" }
+        require(data.size <= BLE_DATA_SIZE) { "BLE 数据长度不能超过16字节" }
+
+        val plainData = ByteArray(BLE_DATA_SIZE)
+        System.arraycopy(data, 0, plainData, 0, data.size)
+        val encrypted = rc4Encrypt(plainData, deriveKey(deviceId))
+
+        return ByteArray(BLE_FRAME_SIZE).apply {
+            this[0] = BLE_LENGTH_MARKER
+            this[1] = BLE_RESERVED
+            this[2] = commandType.toByte()
+            System.arraycopy(encrypted, 0, this, 3, encrypted.size)
+            this[19] = crc8(plainData)
+        }
+    }
+
+    fun buildBleHeaderPayload(projectId: Int, credentialHex: String): ByteArray {
+        val credential = credentialHex.hexToBytes()
+        require(credential.size == 32) { "credential 必须是32字节" }
+
+        val pidBytes = littleEndianInt(projectId)
+        val raw = pidBytes + credential
+        return ByteArray(BLE_DATA_SIZE).apply {
+            this[0] = BLE_HEADER_TOTAL_LENGTH.toByte()
+            this[1] = 0
+            this[2] = ((BLE_HEADER_TOTAL_LENGTH + 14) / 15).toByte()
+            this[3] = crc8(raw)
+        }
+    }
+
+    fun buildBleCredentialPackets(projectId: Int, credentialHex: String, ran: Int): List<ByteArray> {
+        val credential = credentialHex.hexToBytes()
+        require(credential.size == 32) { "credential 必须是32字节, 实际=${credential.size}" }
+
+        val payload = littleEndianInt(ran) + littleEndianInt(projectId) + credential
+        return payload.asBleChunks()
+    }
+
+    fun buildBleRefetchPayload(credentialId: String): ByteArray {
+        val credentialIdInt = credentialId.toLongOrNull()
+            ?.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }
+            ?.toInt()
+            ?: throw IllegalArgumentException("credential_id 不是合法整数: $credentialId")
+        return ByteArray(BLE_DATA_SIZE).apply {
+            val bytes = littleEndianInt(credentialIdInt)
+            System.arraycopy(bytes, 0, this, 0, bytes.size)
+        }
+    }
+
+    fun buildBlePacketReadPayload(packetIndex: Int): ByteArray {
+        require(packetIndex in 0..0xFF) { "分包索引超出范围" }
+        return ByteArray(BLE_DATA_SIZE).apply {
+            this[0] = packetIndex.toByte()
+        }
+    }
+
+    fun parseBleResponse(deviceId: Int, frame: ByteArray): BleResponse {
+        require(frame.size == BLE_FRAME_SIZE) {
+            "BLE响应长度错误: ${frame.size}, hex=${frame.toHexCompact()}"
+        }
+        require(frame[1] == BLE_RESERVED) {
+            "BLE响应保留位错误: reserved=0x${frame[1].toHexByte()}, hex=${frame.toHexCompact()}"
+        }
+
+        val lengthMarker = frame[0].toInt() and 0xFF
+        val commandType = frame[2].toInt() and 0xFF
+        val encryptedData = frame.copyOfRange(3, 19)
+        val plainData = rc4Encrypt(encryptedData, deriveKey(deviceId))
+        val receivedCrc = frame[19]
+        val calculatedCrc = crc8(plainData)
+
+        return BleResponse(
+            lengthMarker = lengthMarker,
+            rawFrame = frame.copyOf(),
+            commandType = commandType,
+            plainData = plainData,
+            crcValid = receivedCrc == calculatedCrc
+        )
+    }
+
+    fun describeResultCode(code: Int): String {
+        return ERROR_MESSAGES[code] ?: "未知错误"
+    }
+
+    fun isKnownResultCode(code: Int): Boolean {
+        return ERROR_MESSAGES.containsKey(code)
+    }
+
     fun parseResponse(deviceId: Int, frame: ByteArray): DoorResponse {
         require(frame.size >= NFC_FRAME_HEADER_SIZE + NFC_FRAME_CRC_SIZE) { "响应太短" }
         require(frame[0] == FRAME_HEADER) { "响应帧头错误" }
@@ -187,10 +281,36 @@ object DoorCrypto {
         return joinToString("") { byte -> "%02X".format(byte.toInt() and 0xFF) }
     }
 
+    private fun Byte.toHexByte(): String {
+        return "%02X".format(toInt() and 0xFF)
+    }
+
     private fun IntArray.swap(first: Int, second: Int) {
         val temp = this[first]
         this[first] = this[second]
         this[second] = temp
+    }
+
+    private fun littleEndianInt(value: Int): ByteArray {
+        return ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(value)
+            .array()
+    }
+
+    private fun ByteArray.asBleChunks(): List<ByteArray> {
+        val packetCount = (size + 14) / 15
+        val source = this
+        return List(packetCount) { packetIndex ->
+            ByteArray(BLE_DATA_SIZE).apply {
+                this[0] = packetIndex.toByte()
+                val start = packetIndex * 15
+                val copySize = minOf(15, source.size - start)
+                for (i in 0 until copySize) {
+                    this[1 + i] = source[start + i]
+                }
+            }
+        }
     }
 
     private fun extractUpdatedCredentialFromNfcPayload(
@@ -246,3 +366,28 @@ data class DoorResponse(
     val updatedCredentialHex: String?,
     val isSuccess: Boolean
 )
+
+data class BleResponse(
+    val lengthMarker: Int,
+    val rawFrame: ByteArray,
+    val commandType: Int,
+    val plainData: ByteArray,
+    val crcValid: Boolean
+) {
+    fun resultCodeAt(index: Int = 0): Int {
+        return plainData.getOrNull(index)?.toInt()?.and(0xFF) ?: -1
+    }
+
+    fun littleEndianIntAt(offset: Int): Int {
+        require(offset >= 0 && offset + 4 <= plainData.size) { "偏移越界" }
+        return ByteBuffer.wrap(plainData, offset, 4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .int
+    }
+
+    fun littleEndianUShortAt(offset: Int): Int {
+        require(offset >= 0 && offset + 2 <= plainData.size) { "偏移越界" }
+        return (plainData[offset].toInt() and 0xFF) or
+            ((plainData[offset + 1].toInt() and 0xFF) shl 8)
+    }
+}

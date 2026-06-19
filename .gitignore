@@ -1,11 +1,26 @@
+# Built outputs
 *.iml
 .gradle
-/local.properties
-/.idea
-.DS_Store
 /build
 /app/build
 /captures
 .externalNativeBuild
 .cxx
-local.properties
+
+# IDE
+/.idea
+.DS_Store
+*.swp
+*~
+
+# Local config
+/local.properties
+*.keystore
+*.jks
+
+# Signing
+/app/release/
+/seu-door-aligned.apk
+
+# OS
+Thumbs.db

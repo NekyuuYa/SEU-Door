@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Background circle -->
+    <path
+        android:fillColor="#006B5F"
+        android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
+
+    <!-- Door frame -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,30L38,78L42,78L42,34L66,34L66,78L70,78L70,30Z"
+        android:strokeWidth="0" />
+
+    <!-- Door panel -->
+    <path
+        android:fillColor="#73F8E1"
+        android:pathData="M44,36L44,64L64,64L64,36Z" />
+
+    <!-- Door handle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60,50m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+
+    <!-- NFC signal arcs -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:pathData="M74,38 Q82,46 74,54" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:pathData="M78,34 Q90,46 78,58" />
+</vector>

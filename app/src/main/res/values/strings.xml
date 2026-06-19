@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">开门</string>
-    <string name="activate_button">首次激活</string>
-    <string name="cancel_activate_button">取消激活</string>
-    <string name="configure_button">重新配置</string>
+    <string name="app_name">SEU Door</string>
 </resources>

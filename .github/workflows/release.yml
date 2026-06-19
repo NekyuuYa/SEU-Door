@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK
+        run: |
+          # Generate a temporary keystore
+          keytool -genkeypair -v \
+            -keystore /tmp/release.jks \
+            -alias release \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=SEU Door, OU=Dev, O=SEU, L=Nanjing, ST=JS, C=CN"
+
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          $BT/zipalign -f -v 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            aligned.apk
+          $BT/apksigner sign \
+            --ks /tmp/release.jks \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            aligned.apk
+
+      - name: Get version
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: aligned.apk
+          generate_release_notes: true
+          name: "SEU Door ${{ steps.version.outputs.tag }}"
