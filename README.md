@@ -4,9 +4,10 @@
 
 ## 功能
 
-- **NFC 开门**: 手机贴近门锁标签即可离线开门（首次需联网激活）
+- **NFC 开门**: 手机贴近门锁标签即可离线开门（无需激活）
 - **BLE 开门**: 蓝牙连接门锁，发送加密凭证开门（无需激活，离线可用）
 - **凭证管理**: 登录后自动从服务器同步门锁地址、凭证、设备信息
+- **凭证刷新**: 顶栏一键刷新；门锁报过期（码 24/27）时自动重新同步
 
 ## 技术栈
 
@@ -18,13 +19,13 @@
 
 ```
 app/src/main/java/com/nkyuu/dooropener/
-├── MainActivity.kt      # Compose UI (NFC/蓝牙 Tab, 配置弹窗)
-├── DoorApi.kt            # 服务器 API (登录、凭证同步、激活)
+├── MainActivity.kt      # Compose UI (NFC/蓝牙 Tab, ReaderMode, 凭证刷新)
+├── DoorApi.kt            # 服务器 API (登录、凭证同步)
 ├── DoorBle.kt            # BLE 通信 (扫描、连接、开门协议)
 ├── DoorCrypto.kt         # 加密算法 (密钥派生、RC4、CRC8、NFC/BLE 命令构造)
 ├── DoorConfigStore.kt    # 凭证本地存储 (AES-GCM 加密)
-├── DoorNfc.kt            # NFC 标签读写
-├── DoorNfcHelper.kt      # NDEF 解析、响应轮询
+├── DoorNfc.kt            # NfcA 连接与读取
+├── DoorNfcHelper.kt      # NDEF 解析、整帧 transceive 开门
 └── ui/theme/             # Material3 主题配色
 ```
 
@@ -54,10 +55,15 @@ $BT/apksigner sign --ks your.keystore aligned.apk
 
 ### NFC
 
-1. 手机贴近门锁标签 → 读取 NDEF 中的 device_id
-2. 本地构造 40 字节加密命令 (RC4 + CRC8)
-3. NfcA.transceive() 写入标签
-4. 门锁读取并验证 → 开门
+> 门锁是联机式 NFC 芯片（内存与 MCU 经 I2C 共享），开门走自定义 RF 命令，**不是 NTAG 页读写**。
+
+1. `enableReaderMode(FLAG_READER_NFC_A)` 发现标签
+2. `0x30` 读 NDEF → 取 URL 里的 device_id
+3. 本地构造 40 字节加密命令 (RC4 + CRC8)
+4. **整帧 `NfcA.transceive(命令)`** → 门锁直接返回 20 字节响应（不拆页、不用 `0xA2`）
+5. 解析结果码 (0/23 成功)；若 24/27 过期 → 自动重新同步凭证，提示再贴一次
+
+详见 [API 文档](api-doc.md) 的「NFC 协议」。
 
 ### BLE
 
