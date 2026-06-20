@@ -49,6 +49,7 @@ android {
 
     buildFeatures {
         buildConfig = false
+        aidl = true
     }
 
     // Strip metadata that's only needed for Kotlin reflection / build tooling.

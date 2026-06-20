@@ -25,3 +25,6 @@
 # OS
 Thumbs.db
 web/
+dex_dump/
+dex_sources/
+alipay_sdk_decompiled/
