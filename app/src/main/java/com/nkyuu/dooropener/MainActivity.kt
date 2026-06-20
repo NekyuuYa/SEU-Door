@@ -79,6 +79,7 @@ private class ConfigDialogViews(val root: View) {
     val errorMessage: TextView = root.requireView(R.id.error_message)
     val cancelButton: View = root.requireView(R.id.cancel_button)
     val syncButton: View = root.requireView(R.id.sync_button)
+    val alipayButton: View = root.requireView(R.id.alipay_login_button)
 }
 
 private fun <T : View> View.requireView(id: Int): T {
@@ -444,6 +445,10 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             dialogBinding.cancelButton.setOnClickListener {
                 dialog.dismiss()
             }
+            dialogBinding.alipayButton.setOnClickListener {
+                dialogBinding.errorMessage.visibility = View.GONE
+                startAlipayLogin()
+            }
             dialogBinding.captchaRefreshButton.setOnClickListener {
                 val phone = dialogBinding.phoneInput.trimmedText()
                 if (phone.isBlank()) {
@@ -525,6 +530,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         dialogBinding.captchaInput.isEnabled = !loading
         dialogBinding.captchaRefreshButton.isEnabled = !loading
         dialogBinding.syncButton.isEnabled = !loading
+        dialogBinding.alipayButton.isEnabled = !loading
         dialogBinding.cancelButton.isEnabled = !loading && hasCredential
     }
 
@@ -686,6 +692,47 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                             getString(R.string.tst_rff, e.resolveMessage(this)),
                             Toast.LENGTH_LONG
                         ).show()
+                    }
+                }
+            } finally {
+                busy.set(false)
+                runOnUiThread {
+                    setBusyState(false)
+                    updateIdleStatus()
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * 通过 IAlixPay AIDL 拉起支付宝 app 完成快捷登录授权（无 SDK、无内嵌 WebView）。
+     * 全程一个工作线程：取 auth_info → Pay() 阻塞授权 → 换登录态并保存（password 留空）。
+     */
+    private fun startAlipayLogin() {
+        if (!busy.compareAndSet(false, true)) return
+
+        setBusyState(true)
+        Toast.makeText(this, getString(R.string.oauth_loading), Toast.LENGTH_SHORT).show()
+
+        Thread {
+            try {
+                val authInfo = DoorApi().fetchAlipayAuthInfo()
+                val authCode = DoorAlipayAuth.authorize(this, authInfo)
+                val fresh = DoorApi().syncCredentialWithAlipay(authCode)
+                store.save(fresh)
+                runOnUiThread {
+                    hasCredential = true
+                    Toast.makeText(this, getString(R.string.tst_syn), Toast.LENGTH_SHORT).show()
+                    configDialog?.dismiss()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    if (configDialog?.isShowing != true) {
+                        showConfigDialog()
+                    }
+                    configViews?.let {
+                        it.errorMessage.text = e.resolveMessage(this)
+                        it.errorMessage.visibility = View.VISIBLE
                     }
                 }
             } finally {

@@ -173,11 +173,11 @@
 
         <Button
             android:id="@+id/cancel_button"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="48dp"
+            android:layout_weight="1"
             android:background="@drawable/bg_secondary_button"
             android:fontFamily="sans-serif-medium"
-            android:minWidth="92dp"
             android:paddingStart="20dp"
             android:paddingEnd="20dp"
             android:text="@android:string/cancel"
@@ -187,12 +187,12 @@
 
         <Button
             android:id="@+id/sync_button"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="48dp"
+            android:layout_weight="1"
             android:layout_marginStart="10dp"
             android:background="@drawable/bg_primary_button"
             android:fontFamily="sans-serif-medium"
-            android:minWidth="120dp"
             android:paddingStart="22dp"
             android:paddingEnd="22dp"
             android:stateListAnimator="@null"
@@ -201,5 +201,26 @@
             android:textColor="@color/button_primary_text"
             android:textSize="14sp" />
     </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:gravity="center"
+        android:text="@string/oauth_or"
+        android:textColor="@color/color_on_surface_variant"
+        android:textSize="12sp" />
+
+    <Button
+        android:id="@+id/alipay_login_button"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_secondary_button"
+        android:fontFamily="sans-serif-medium"
+        android:text="@string/btn_alipay"
+        android:textAllCaps="false"
+        android:textColor="@color/color_primary"
+        android:textSize="14sp" />
 
 </LinearLayout>

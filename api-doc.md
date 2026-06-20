@@ -123,6 +123,302 @@ GET https://pm.whxinna.com/webapi/users/get_login_code
 
 ---
 
+### 1.2 OAuth 登录
+
+两个端点，按 provider 分：
+
+```text
+GET https://pm.whxinna.com/webapi/oauth/login            # 微信、支付宝
+GET https://pm.whxinna.com/webapi/oauth/account_login     # 华为、CMIC一键登录
+```
+
+**已提取的 AppID / AppSecret**（从 APK 逆向）:
+
+| 平台 | AppID | AppSecret | 来源 |
+|------|-------|-----------|------|
+| 微信 | `wx9622aee7b9ae7536` | `425b4b4ad72c0a317f28bc6b311adfd3` | APK resources.arsc |
+| 支付宝 | `2021001155694496` | 无（RSA2签名，私钥在服务器） | 服务器 `/webapi/oauth/alipay/auth_info` |
+| 支付宝 PID | `2088901922185401` | — | 同上 |
+
+**微信网页 OAuth 流程**（可用，不依赖原生 SDK）:
+
+1. 构造授权 URL（用户扫码）：
+   ```
+   https://open.weixin.qq.com/connect/oauth2/authorize
+     ?appid=wx9622aee7b9ae7536
+     &redirect_uri=<回调URL>
+     &response_type=code
+     &scope=snsapi_userinfo
+     &state=STATE
+     #wechat_redirect
+   ```
+2. 用户授权后回调带 `code`
+3. 用 AppID + AppSecret 换 `access_token`：
+   ```
+   GET https://api.weixin.qq.com/sns/oauth2/access_token
+     ?appid=wx9622aee7b9ae7536
+     &secret=425b4b4ad72c0a317f28bc6b311adfd3
+     &code=<code>
+     &grant_type=authorization_code
+   ```
+4. 把 `access_token` + `openid` 发给门锁服务器 `/webapi/oauth/login`
+
+**支付宝网页 OAuth 流程**（用户登录，客户端无需换 token）:
+
+用户登录用**用户信息授权**端点 `publicAppAuthorize.htm`（**不是** `appToAppAuth.htm`）：
+```
+https://openauth.alipay.com/oauth2/publicAppAuthorize.htm
+  ?app_id=2021001155694496
+  &scope=auth_user
+  &redirect_uri=<白名单回调URL>
+```
+
+- 回调带的是**用户 `auth_code`**（不是 `app_auth_code`）。
+- **客户端不做 token 交换**：把 `auth_code` 直接发 `/webapi/oauth/login`，RSA 换 token 由**服务器**完成
+  （私钥在服务器，这也是 auth_info 要找服务器签名的原因）。
+- 已验证：`publicAppAuthorize.htm?app_id=2021001155694496&scope=auth_user&redirect_uri=...`
+  → 302 跳支付宝登录页（app_id 受理）。
+
+> **端点辨析**：`appToAppAuth.htm` 是**第三方应用授权（ISV 代商户）**流程，回调 `app_auth_code`
+> 需 `alipay.open.auth.token.app` 换 `app_auth_token`——那是给商户授权、不是用户登录，
+> 用错才会卡在"客户端换不了 token"。用户登录走 `publicAppAuthorize.htm`，客户端不碰私钥。
+>
+> **auth_info（`/webapi/oauth/alipay/auth_info`）是 SDK 专用格式**（`method=alipay.open.auth.sdk.code.get`、
+> `scope=kuaijie`），喂给原生 `AuthTask.authV2()` 或拉起支付宝 app 用；网页流程用 `publicAppAuthorize.htm`，不用 auth_info。
+
+**跳转支付宝 app（AIDL 方案，无需 SDK）**:
+
+逆向支付宝 SDK 发现，`AuthTask.authV2()` 底层通过 AIDL 绑定支付宝 app 的 service：
+
+```kotlin
+// 绑定支付宝 service
+val intent = Intent("com.eg.android.AlipayGphone.IAlixPay")
+intent.setPackage("com.eg.android.AlipayGphone")
+bindService(intent, connection, Context.BIND_AUTO_CREATE)
+
+// 获取 IAlixPay 接口
+val alixPay = IAlixPay.Stub.asInterface(binder)
+
+// 注册回调（处理支付宝app内部跳转）
+alixPay.registerCallback(callback)
+
+// 调用 Pay（同步阻塞，直接返回结果）
+val result = alixPay.Pay(authInfo)  // authInfo 从服务器 /alipay/auth_info 获取
+
+// 解析结果
+// resultStatus={9000};memo={};result={auth_code=xxx&user_id=xxx}
+```
+
+**只需要两个 AIDL 文件**（体积极小，不需要完整 SDK）：
+- `IAlixPay.aidl` — 主接口，transaction code 1 = `Pay(String)`
+- `IRemoteServiceCallback.aidl` — 回调，处理 `startActivity` 等
+
+**回传通道**: `Pay()` 是同步阻塞调用，结果直接返回，不需要 onActivityResult 或 scheme 回跳。
+
+**请求参数**（已对真实服务器验证）:
+
+与 `/webapi/users/login` 同构——**签名 GET**，但嵌套对象用 **base64 URL-safe 编码**（原 app 的 `beforeRequest` 拦截器逻辑）：
+
+1. 把 `systemInfo`、`authInfo` 等对象 JSON.stringify 后做 base64 编码（`+/` 替换为 `-_`）
+2. 编码后的字段名加 `base64_` 前缀
+3. 加上 `timestamp`、`noncestr`、`sign` 等公共参数一起签名
+
+```
+GET /webapi/oauth/login
+  ?base64_systemInfo=<base64({"appVersion":"1.0.0","systemType":"android",...})>
+  &base64_authInfo=<base64({"auth_code":"xxx","oauth_type":"alipay_app","sign_type":"RSA"})>
+  &app_version=1.0.0
+  &timestamp=xxx
+  &noncestr=xxx
+  &sign=xxx
+```
+
+签名密钥: `6d5dbb85b949447a95ff8fda9a9b759b`（签名时 key 包含 `base64_` 前缀）
+
+> **注意**: 不是 POST JSON body，不是平铺参数，不是 bracket 嵌套参数。
+> 平铺参数也能通过签名校验但服务器返回 `result:false`（不认）。
+
+**响应** (base64 解码): 同账号密码登录。
+
+**各 provider 获取 auth_code 的方式**:
+
+| provider | 原生 SDK 调用 | 获取的字段 | 能否不用 SDK |
+|----------|-------------|-----------|------------|
+| 微信 | `zl.oauth.sendAuth({provider:"WeChat",info:null})` | `access_token`, `openid`, `refresh_token` | 用网页OAuth（扫码），见下方 |
+| 支付宝 | 先调 `GET /webapi/oauth/alipay/auth_info` 获取参数，再 `zl.oauth.sendAuth({provider:"Alipay",info:JSON})` | `authCode` | 构造Intent跳支付宝app，见下方 |
+| 华为 | `zl.oauth.sendAuth({provider:"HarmonyOS",info:""})` | `authCode` | 需华为Account SDK，无法绕过 |
+| CMIC | `zl.cmic.loginAuth({info:"cmic_phone"})` | `token` | 需CMIC SDK，无法绕过 |
+
+> **注意**: 微信登录时 `auth_code` 实际传的是 `access_token`，`oauth_type` 固定为 `wechat_app`。
+> 华为和CMIC共用 `/webapi/oauth/account_login` 端点，区别仅在 `oauth_type`。
+
+**微信不用 SDK 的方案**:
+
+微信 SDK（`com.tencent.mm.opensdk`）通过 `IWXAPI` + `WXEntryActivity` 与微信 app 通信，
+无法简单构造 Intent 绕过。但可以用**网页 OAuth**：
+
+1. 用户在浏览器访问授权 URL（手机会跳转微信 app 或显示二维码）
+2. 授权后回调带 `code`
+3. 服务器用 AppID + AppSecret 换 `access_token`
+
+网页 OAuth 不需要 SDK，但用户体验是扫码而非直接跳转微信 app。
+
+**登录后流程**:
+
+1. 若 `user_info.is_pwd == 0` → 需先设置密码（`/account/set_password`）
+2. 若 `user_info.isbind == false` → 需绑定项目（`/account/bind_project`）
+3. 若返回 `"授权信息未找到"` 或 `"openid错误"` → 需走「绑定手机」流程（见 1.6）
+
+---
+
+### 1.3 CMIC 一键登录（本机号码登录）
+
+> **限制**: 需要集成中国移动 CMIC SDK 并注册应用，第三方客户端无法直接使用。仅作协议留档。
+
+CMIC（中国移动互联网能力平台）通过 SIM 卡认证，无需短信验证码。
+
+**前提**: 客户端需集成 CMIC SDK，且 `isCmicAuthLoginDisplay` 配置为 true。
+
+**Step 1: 调用 CMIC SDK 获取 token**
+
+```javascript
+zl.cmic.loginAuth({info: "cmic_phone"}, callback)
+// callback 参数:
+//   e.code == 0 → 成功，e.token 为认证 token
+//   e.code == 200020 → CMIC 特定错误
+//   e.code == 103000 → CMIC 特定错误
+```
+
+**Step 2: 用 token 换登录态**
+
+```text
+POST https://pm.whxinna.com/webapi/oauth/account_login
+```
+
+请求体（同 OAuth 登录）:
+
+```json
+{
+  "systemInfo": {
+    "appVersion": "1.0.0",
+    "systemType": "android",
+    "systemVersion": "14",
+    "deviceModel": "Pixel 7",
+    "deviceToken": "IMEI 或 UUID"
+  },
+  "authInfo": {
+    "auth_code": "CMIC SDK 返回的 token",
+    "oauth_type": "cmic_phone",
+    "sign_type": "RSA"
+  },
+  "app_version": "1.0.0"
+}
+```
+
+签名密钥: `6d5dbb85b949447a95ff8fda9a9b759b`
+
+**响应**: 同账号密码登录。
+
+> **与华为一键登录共用端点**: 华为 (`oauth_type: "huawei_account"`) 也走 `/webapi/oauth/account_login`，
+> 区别仅在 `oauth_type` 和原生 SDK 调用方式。
+
+---
+
+### 1.4 注册
+
+```text
+GET https://pm.whxinna.com/webapi/users/sendregSMS    # 发送短信验证码
+POST https://pm.whxinna.com/webapi/users/register      # 注册
+```
+
+**发送验证码**: `GET /webapi/users/sendregSMS?phone=xxx`
+
+**注册**:
+
+| 参数 | 说明 |
+|------|------|
+| `phone` | 手机号 |
+| `code` | 短信验证码 |
+| `pwd` | 6 位数字密码 |
+
+签名密钥: `6d5dbb85b949447a95ff8fda9a9b759b`
+
+---
+
+### 1.5 密码重置
+
+```text
+GET https://pm.whxinna.com/webapi/users/sendresetpwdSMS  # 发送短信验证码
+POST https://pm.whxinna.com/webapi/oauth/pwd_reset        # 重置密码
+```
+
+**发送验证码**: `GET /webapi/users/sendresetpwdSMS?phone=xxx`
+
+**重置密码**:
+
+| 参数 | 说明 |
+|------|------|
+| `phone` | 手机号 |
+| `code` | 短信验证码 |
+| `newpwd` | 新密码（6 位数字） |
+
+签名密钥: `6d5dbb85b949447a95ff8fda9a9b759b`
+
+---
+
+### 1.6 绑定手机（OAuth 后）
+
+首次 OAuth 登录时若返回 `"授权信息未找到"` 或 `"openid错误"`，需走此流程：
+
+**Step 1: 获取验证码**
+
+```text
+POST https://pm.whxinna.com/webapi/oauth/get_auth_code
+```
+
+| 参数 | 说明 |
+|------|------|
+| `phone` | 手机号 |
+| `oauth_type` | `wechat_app` / `alipay_app` |
+| `openid` | 微信登录时传（`wechat_app`） |
+| `auth_code` | 支付宝登录时传（`alipay_app`） |
+
+**Step 2: 绑定**
+
+```text
+POST https://pm.whxinna.com/webapi/oauth/auth_by_code
+```
+
+请求体:
+
+```json
+{
+  "systemInfo": {
+    "appVersion": "1.0.0",
+    "systemType": "android",
+    "systemVersion": "14",
+    "deviceModel": "Pixel 7",
+    "deviceToken": "IMEI 或 UUID"
+  },
+  "userInfo": {
+    "phone": "手机号",
+    "password": "6位数字密码（可选，首次绑定时设置）",
+    "...其他OAuth用户信息"
+  },
+  "authInfo": {
+    "auth_code": "OAuth 授权码",
+    "oauth_type": "wechat_app | alipay_app",
+    "sign_type": "RSA"
+  },
+  "code": "短信验证码"
+}
+```
+
+> 若 `10001` 返回码表示需要设置密码（显示密码输入框），其他码表示验证码已发送。
+> 也有 `auth_by_password` 端点用密码代替验证码绑定。
+
+---
+
 ### 2. 获取门锁信息
 
 ```text

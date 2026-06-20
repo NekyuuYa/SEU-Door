@@ -6,6 +6,7 @@
     <string name="bl_nrby">附近设备:</string>
     <string name="bl_on">请先开启蓝牙</string>
     <string name="bl_perm">缺少蓝牙权限</string>
+    <string name="btn_alipay">支付宝登录</string>
     <string name="btn_ble">蓝牙开门</string>
     <string name="btn_captcha_refresh">刷新图片</string>
     <string name="btn_syn">同步门禁凭证</string>
@@ -18,6 +19,7 @@
 设备ID: %2$d</string>
     <string name="dt_nop">
 %1$s</string>
+    <string name="err_alipay_missing">未检测到支付宝 app，请安装支付宝或改用密码登录。</string>
     <string name="err_crd">凭证不可用</string>
     <string name="err_captcha_manual">当前登录需要验证码，请输入后再同步。</string>
     <string name="err_nfc">当前设备不支持NFC</string>
@@ -28,6 +30,8 @@
     <string name="fld_captcha">验证码</string>
     <string name="fld_phn">手机号</string>
     <string name="fld_pwd">密码</string>
+    <string name="oauth_loading">正在通过支付宝登录…</string>
+    <string name="oauth_or">— 或 —</string>
     <string name="sd_bler">设备: %1$s
 地址: %2$s
 结果: %3$d - %4$s%5$s</string>

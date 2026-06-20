@@ -16,8 +16,88 @@ import java.security.SecureRandom
 class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
     fun syncCredential(phone: String, password: String, code: String? = null): DoorCredentialSnapshot {
-        val loginData = login(phone, password, code)
+        return buildSnapshotFromLogin(login(phone, password, code), phone = phone, password = password)
+    }
 
+    /**
+     * 支付宝 OAuth 登录：用外部支付宝 app 授权拿到的 auth_code 换登录态，
+     * 之后与密码登录走完全相同的业务流程。OAuth 没有可复用密码，snapshot 的 password 留空；
+     * 凭证过期时由 UI 回落到配置弹窗重新授权（refreshCredential / NFC 自动刷新均已对空密码判断，不会静默重登）。
+     */
+    fun syncCredentialWithAlipay(authCode: String): DoorCredentialSnapshot {
+        val loginData = oauthLogin(authCode, OAUTH_TYPE_ALIPAY)
+        val phone = findString(loginData, "phone").orEmpty()
+        return buildSnapshotFromLogin(loginData, phone = phone, password = "")
+    }
+
+    /** 取支付宝快捷登录 auth_info（服务器 RSA2 签名的 SDK 串），交给 IAlixPay.Pay()。 */
+    fun fetchAlipayAuthInfo(): String {
+        val body = authGetRaw(
+            path = "/webapi/oauth/alipay/auth_info",
+            params = mutableMapOf(),
+            nonceLength = AUTH_NONCE_LENGTH
+        )
+        val outer = parseJsonObject(body) ?: throw DoorApiException(rawText("支付宝授权信息获取失败"))
+        if (!isSuccess(outer)) {
+            val serverMessage = extractServerMessage(outer)
+            throw DoorApiException(
+                serverMessage?.let { rawText(it) } ?: rawText("支付宝授权信息获取失败"),
+                serverMessage = serverMessage
+            )
+        }
+        // data 解码后是 JSON 字符串字面量（外层带引号），剥成真正的 authInfo 串
+        val decoded = decodeBase64Text(outer.optString("data"))?.trim()
+            ?: throw DoorApiException(rawText("支付宝授权信息为空"))
+        return unquoteJsonString(decoded).takeIf { it.isNotBlank() }
+            ?: throw DoorApiException(rawText("支付宝授权信息为空"))
+    }
+
+    private fun unquoteJsonString(value: String): String {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("\"")) return trimmed
+        return runCatching { JSONArray("[$trimmed]").getString(0) }
+            .getOrDefault(trimmed.trim('"'))
+    }
+
+    private fun oauthLogin(authCode: String, oauthType: String): Any {
+        // OAuth 登录：GET + base64 编码的嵌套参数（原 app 的 beforeRequest 逻辑）。
+        val systemInfo = JSONObject().apply {
+            put("appVersion", "1.0.0")
+            put("systemType", "android")
+            put("systemVersion", android.os.Build.VERSION.RELEASE)
+            put("deviceModel", android.os.Build.MODEL)
+            put("deviceToken", "")
+        }
+        val authInfo = JSONObject().apply {
+            put("auth_code", authCode)
+            put("oauth_type", oauthType)
+            put("sign_type", OAUTH_SIGN_TYPE)
+        }
+        val b64Sys = base64UrlEncode(systemInfo.toString())
+        val b64Auth = base64UrlEncode(authInfo.toString())
+        val result = authGet(
+            path = "/webapi/oauth/login",
+            params = mutableMapOf(
+                "base64_systemInfo" to b64Sys,
+                "base64_authInfo" to b64Auth,
+                "app_version" to "1.0.0"
+            ),
+            nonceLength = AUTH_NONCE_LENGTH
+        )
+        return result
+    }
+
+    private fun base64UrlEncode(data: String): String {
+        return Base64.encodeToString(data.toByteArray(), Base64.NO_WRAP)
+            .replace('+', '-')
+            .replace('/', '_')
+    }
+
+    private fun buildSnapshotFromLogin(
+        loginData: Any,
+        phone: String,
+        password: String
+    ): DoorCredentialSnapshot {
         val userId = requireString(loginData, "id", "user_id", "userId", "uid")
         val identityCode = requireString(loginData, "identity_code", "identitycode")
         val serverAddr = requireString(loginData, "server_addr")
@@ -159,6 +239,12 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         )
     }
 
+    /**
+     * OAuth 登录专用：嵌套参数 GET（axios 序列化格式）。
+     * 把 {systemInfo:{appVersion:xxx}, authInfo:{auth_code:xxx}} 展开成
+     * systemInfo[appVersion]=xxx&authInfo[auth_code]=xxx 的 query string。
+     */
+
     private fun authGetRaw(path: String, params: MutableMap<String, String>, nonceLength: Int): String {
         val signedParams = signParams(
             params = params,
@@ -223,6 +309,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             connection.disconnect()
         }
     }
+
 
     private fun performGetRaw(baseUrl: String, path: String, params: Map<String, String>): String {
         val query = encodeParams(params)
@@ -509,6 +596,10 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         const val APP_ID = 20104
 
         private const val AUTH_SIGN_SECRET = "6d5dbb85b949447a95ff8fda9a9b759b"
+
+        // === 支付宝 OAuth（IAlixPay AIDL 拉起支付宝 app，无 SDK，见 DoorAlipayAuth）===
+        private const val OAUTH_TYPE_ALIPAY = "alipay_app"
+        private const val OAUTH_SIGN_TYPE = "RSA"
         private const val AUTH_NONCE_LENGTH = 32
         private const val BUSINESS_NONCE_LENGTH = 16
         private const val CAPTCHA_FETCH_ATTEMPTS = 2

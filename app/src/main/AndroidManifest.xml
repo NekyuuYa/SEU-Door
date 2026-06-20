@@ -13,6 +13,11 @@
 
     <uses-feature android:name="android.hardware.nfc" android:required="true" />
 
+    <!-- 显式绑定支付宝 IAlixPay service 需要包可见性（targetSdk 30+） -->
+    <queries>
+        <package android:name="com.eg.android.AlipayGphone" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
