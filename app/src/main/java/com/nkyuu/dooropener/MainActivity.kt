@@ -100,6 +100,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     private var nfcAdapter: NfcAdapter? = null
 
     private val busy = AtomicBoolean(false)
+    private var isResumed = false
     private var pendingBleOpen = false
     private var selectedTab = MainTab.Nfc
     private var configDialog: AlertDialog? = null
@@ -150,8 +151,28 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
     override fun onResume() {
         super.onResume()
-        // ReaderMode：拿干净的原始 NfcA 通道，平台不插手 NDEF/存在性检查，
-        // 自定义命令 transceive(0xB1...) 才能稳定收到门锁响应。
+        isResumed = true
+        enableReaderModeIfIdle()
+        updateIdleStatus()
+    }
+
+    override fun onPause() {
+        isResumed = false
+        nfcAdapter?.disableReaderMode(this)
+        stopPulse()
+        super.onPause()
+    }
+
+    /**
+     * 开启 ReaderMode：拿干净的原始 NfcA 通道，平台不插手 NDEF/存在性检查，
+     * 自定义命令 transceive(0xB1...) 才能稳定收到门锁响应。
+     *
+     * 关键：若正在处理标签（典型是冷启动 intent 里带来的那张标签）就先不抢通道。
+     * 否则 enableReaderMode 会重置 NFC 控制器，把进行中的 NfcA 会话打断。
+     * 处理结束后由 setBusyState(false) 再调一次本方法把 ReaderMode 补上。
+     */
+    private fun enableReaderModeIfIdle() {
+        if (!isResumed || busy.get()) return
         val flags = NfcAdapter.FLAG_READER_NFC_A or
             NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or
             NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
@@ -159,13 +180,6 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 1000)
         }
         nfcAdapter?.enableReaderMode(this, this, flags, options)
-        updateIdleStatus()
-    }
-
-    override fun onPause() {
-        nfcAdapter?.disableReaderMode(this)
-        stopPulse()
-        super.onPause()
     }
 
     override fun onDestroy() {
@@ -602,6 +616,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         isBusyState = value
         renderCurrentState()
         configDialog?.let { setConfigDialogLoading(value) }
+        // 标签处理结束（含冷启动 intent 的那张），把刚才让位的 ReaderMode 补回来
+        if (!value) enableReaderModeIfIdle()
     }
 
     private fun updateIdleStatus() {

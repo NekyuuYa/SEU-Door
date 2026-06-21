@@ -5,6 +5,7 @@
 ## 功能
 
 - NFC 开门：贴近门锁标签后直接发送原始 NfcA 命令开门
+- NFC 唤起：app 未在前台时贴门锁标签可自动拉起并直接开门
 - BLE 开门：扫描或直连门锁蓝牙，发送加密凭证开门
 - 凭证同步：使用手机号和密码从服务器拉取 device_id、credential、ble_mac 等信息
 - 凭证刷新：支持手动刷新；NFC 遇到 `24/27`、BLE 遇到 `27` 时自动处理刷新
@@ -102,6 +103,16 @@ Manifest 中当前使用：
 5. 解析 20 字节响应，结果码 `0/23` 视为成功
 
 不使用 `0xA2` 分页写入，也不依赖服务器下发激活数据。
+
+#### NFC 唤起（app 未在前台时）
+
+门锁标签 NDEF 内嵌 AAR（Android Application Record，`com.whxinna.userplatform`），优先级高于第三方 NDEF 过滤器；实测系统在该包未安装时不会回落到第三方过滤器。因此：
+
+1. 本 app 的 `applicationId` 设为 `com.whxinna.userplatform`，让 AAR 直接指向本 app（`namespace`/代码仍为 `com.nkyuu.dooropener`）
+2. Manifest 注册精确 host 的 `NDEF_DISCOVERED`（`uc-zhuli.whxinna.com`），AAR 命中本包后把带标签的 intent 投给 `MainActivity`，一贴即开
+3. `TAG_DISCOVERED` 作为末位兜底
+
+注意：灭屏/锁屏能否读卡取决于系统设置（部分机型默认息屏不读卡），app 无法强制。
 
 ### BLE
 

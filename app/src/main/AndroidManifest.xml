@@ -32,6 +32,22 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+                NFC 唤起：app 未在前台时贴门锁标签自动拉起。
+                门锁标签 NDEF 第一条是 URI(https://uc-zhuli.whxinna.com/?t=lock&d=...)，
+                第二条是 AAR(com.whxinna.userplatform 官方 app)。系统派发顺序：
+                  1) 先尝试 AAR 指定包；该包未安装时
+                  2) 回落到普通 NDEF 派发 → 命中下面这个精确 host 过滤器 → 唤起本 app。
+                只精确匹配该 host，避免被任意网址标签污染。
+                注意：若安装了官方 app，冷启动会被 AAR 抢走，唯有前台 ReaderMode 能压过。
+            -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="https" android:host="uc-zhuli.whxinna.com" />
+                <data android:scheme="http" android:host="uc-zhuli.whxinna.com" />
+            </intent-filter>
+            <!-- 末位兜底：NDEF 派发万一失败时，仍能由 TAG_DISCOVERED 拉起 -->
             <intent-filter>
                 <action android:name="android.nfc.action.TAG_DISCOVERED" />
                 <category android:name="android.intent.category.DEFAULT" />

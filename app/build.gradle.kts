@@ -19,7 +19,10 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.nkyuu.dooropener"
+        // NFC 唤起：门锁标签内嵌 AAR(com.whxinna.userplatform)，系统贴卡时按 AAR 找安装包。
+        // AAR 包未安装时不会回落到第三方 NDEF 过滤器，所以这里直接“冒充”该包名，
+        // 让 AAR 指向本 app → 贴卡即唤起本 app（namespace/代码仍用 com.nkyuu.dooropener）。
+        applicationId = "com.whxinna.userplatform"
         minSdk = 26
         targetSdk = 34
         versionCode = 2
