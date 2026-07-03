@@ -117,9 +117,10 @@
                 android:background="@drawable/bg_status_detail"
                 android:fontFamily="monospace"
                 android:lineSpacingExtra="4dp"
-                android:minHeight="120dp"
+                android:minHeight="160dp"
                 android:padding="18dp"
                 android:textColor="@color/color_on_surface_variant"
+                android:textIsSelectable="true"
                 android:textSize="13sp" />
 
             <Button
@@ -131,6 +132,19 @@
                 android:fontFamily="sans-serif-medium"
                 android:stateListAnimator="@null"
                 android:text="@string/btn_ble"
+                android:textAllCaps="false"
+                android:textColor="@color/button_primary_text"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/ble_fob_button"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_primary_button"
+                android:fontFamily="sans-serif-medium"
+                android:stateListAnimator="@null"
+                android:text="@string/btn_fob"
                 android:textAllCaps="false"
                 android:textColor="@color/button_primary_text"
                 android:textSize="16sp" />

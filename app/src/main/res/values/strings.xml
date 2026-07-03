@@ -7,6 +7,7 @@
     <string name="bl_on">Turn on Bluetooth first</string>
     <string name="bl_perm">Bluetooth permission is missing</string>
     <string name="btn_ble">Unlock via Bluetooth</string>
+    <string name="btn_fob">Configure Key Fob</string>
     <string name="btn_alipay">Sign in with Alipay</string>
     <string name="btn_captcha_refresh">Refresh image</string>
     <string name="btn_syn">Sync credential</string>
@@ -14,9 +15,7 @@
     <string name="dlg_cfg">Configure door access account</string>
     <string name="drBusy">Device is already in use</string>
     <string name="dr_ok">Unlocked</string>
-    <string name="dt_dev">
-Account: %1$s
-Device ID: %2$d</string>
+    <string name="dt_dev">Account: %1$s\nDevice ID: %2$d\nCredential ID: %4$s\nCredential: %3$s</string>
     <string name="dt_nop">
 %1$s</string>
     <string name="err_crd">Credential unavailable</string>

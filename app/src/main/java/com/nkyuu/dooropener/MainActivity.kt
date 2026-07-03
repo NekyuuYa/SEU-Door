@@ -3,6 +3,7 @@ package com.nkyuu.dooropener
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
@@ -56,6 +57,7 @@ private class MainViews(root: View) {
     val refreshButton: View = root.requireView(R.id.refresh_button)
     val settingsButton: View = root.requireView(R.id.settings_button)
     val bleOpenButton: View = root.requireView(R.id.ble_open_button)
+    val bleFobButton: View = root.requireView(R.id.ble_fob_button)
     val tabNfc: View = root.requireView(R.id.tab_nfc)
     val tabBle: View = root.requireView(R.id.tab_ble)
     val tabNfcLabel: TextView = root.requireView(R.id.tab_nfc_label)
@@ -102,6 +104,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     private val busy = AtomicBoolean(false)
     private var isResumed = false
     private var pendingBleOpen = false
+    private var pendingFobConfig = false
     private var selectedTab = MainTab.Nfc
     private var configDialog: AlertDialog? = null
     private var configViews: ConfigDialogViews? = null
@@ -207,8 +210,12 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         if (granted && pendingBleOpen) {
             pendingBleOpen = false
             startBleOpen()
+        } else if (granted && pendingFobConfig) {
+            pendingFobConfig = false
+            startFobConfig()
         } else {
             pendingBleOpen = false
+            pendingFobConfig = false
             setBle(
                 getString(R.string.st_fail),
                 rawText("未授予蓝牙权限").resolve(this),
@@ -219,9 +226,19 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
     private fun setupViews() {
         views.statusDetail.movementMethod = ScrollingMovementMethod()
+        views.statusDetail.setOnLongClickListener {
+            val text = views.statusDetail.text?.toString()
+            if (!text.isNullOrBlank()) {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("credential", text))
+                Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show()
+            }
+            true
+        }
         views.refreshButton.setOnClickListener { refreshCredential() }
         views.settingsButton.setOnClickListener { showConfigDialog() }
         views.bleOpenButton.setOnClickListener { startBleOpen() }
+        views.bleFobButton.setOnClickListener { startFobConfig() }
         views.tabNfc.setOnClickListener { selectTab(MainTab.Nfc) }
         views.tabBle.setOnClickListener { selectTab(MainTab.Ble) }
 
@@ -289,6 +306,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         renderStatus(selectedTab, status)
         views.bleOpenButton.visibility = if (selectedTab == MainTab.Ble) View.VISIBLE else View.GONE
         views.bleOpenButton.isEnabled = !isBusyState && hasCredential
+        views.bleFobButton.visibility = if (selectedTab == MainTab.Ble) View.VISIBLE else View.GONE
+        views.bleFobButton.isEnabled = !isBusyState && hasCredential
         views.refreshButton.isEnabled = !isBusyState
     }
 
@@ -624,8 +643,9 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         if (busy.get()) return
 
         val snapshot = store.load()
+        val credentialPreview = snapshot?.credentialHex.orEmpty()
         val account = snapshot?.let {
-            getString(R.string.dt_dev, it.phone, it.deviceId)
+            getString(R.string.dt_dev, it.phone, it.deviceId, credentialPreview, it.credentialId)
         }.orEmpty()
 
         when {
@@ -668,10 +688,10 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         renderCurrentState()
     }
 
-    /** 手动刷新凭证：用已存的账号密码重新同步（处理过期）。 */
+    /** 手动刷新凭证：优先用缓存 sessionSecret 直接拉取，失败再回落到完整登录。 */
     private fun refreshCredential() {
         val snapshot = store.load()
-        if (snapshot == null || snapshot.phone.isBlank() || snapshot.password.isBlank()) {
+        if (snapshot == null || snapshot.phone.isBlank()) {
             showConfigDialog()
             return
         }
@@ -691,7 +711,12 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
         Thread {
             try {
-                val fresh = DoorApi().syncCredential(snapshot.phone, snapshot.password)
+                val fresh = try {
+                    DoorApi().refreshCredentialOnly(snapshot)
+                } catch (fallback: Exception) {
+                    if (snapshot.password.isBlank()) throw fallback
+                    DoorApi().syncCredential(snapshot.phone, snapshot.password)
+                }
                 store.save(fresh)
                 runOnUiThread {
                     hasCredential = true
@@ -878,9 +903,14 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             }
 
             if (decoded.resultCode in CREDENTIAL_REFRESH_CODES &&
-                snapshot.phone.isNotBlank() && snapshot.password.isNotBlank()) {
+                snapshot.phone.isNotBlank()) {
                 return try {
-                    val fresh = DoorApi().syncCredential(snapshot.phone, snapshot.password)
+                    val fresh = try {
+                        DoorApi().refreshCredentialOnly(snapshot)
+                    } catch (fallback: Exception) {
+                        if (snapshot.password.isBlank()) throw fallback
+                        DoorApi().syncCredential(snapshot.phone, snapshot.password)
+                    }
                     store.save(fresh)
                     DoorOpenResult(
                         false,
@@ -1016,6 +1046,91 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                             DoorStatusKind.Error
                         )
                     }
+                }
+            } finally {
+                busy.set(false)
+                runOnUiThread { setBusyState(false) }
+            }
+        }.start()
+    }
+
+    private fun startFobConfig() {
+        if (busy.get()) {
+            setBle(
+                getString(R.string.st_ble),
+                getString(R.string.sd_proc),
+                DoorStatusKind.Busy
+            )
+            return
+        }
+
+        val snapshot = store.load() ?: run {
+            setBle(
+                getString(R.string.st_fail),
+                getString(R.string.err_syn),
+                DoorStatusKind.Error
+            )
+            showConfigDialog()
+            return
+        }
+
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        val missing = permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            pendingFobConfig = true
+            requestPermissions(missing.toTypedArray(), REQ_BLE_PERMS)
+            return
+        }
+
+        if (!busy.compareAndSet(false, true)) {
+            setBle(
+                getString(R.string.st_ble),
+                getString(R.string.sd_proc),
+                DoorStatusKind.Busy
+            )
+            return
+        }
+
+        setBusyState(true)
+        setBle(
+            "配置钥匙扣",
+            "正在扫描钥匙扣…",
+            DoorStatusKind.Busy
+        )
+
+        Thread {
+            try {
+                val result = DoorFob.configureFob(this, snapshot) { msg ->
+                    runOnUiThread {
+                        setBle("配置钥匙扣", msg, DoorStatusKind.Busy)
+                    }
+                }
+                runOnUiThread {
+                    val detail = buildString {
+                        append("设备: ${result.deviceName}\n")
+                        append("地址: ${result.deviceAddress}\n")
+                        if (result.deviceInfo.isNotBlank()) {
+                            append("信息: ${result.deviceInfo}\n")
+                        }
+                        append("状态: ${result.statusCode} - ${result.resultMessage}")
+                    }
+                    setBle(
+                        if (result.success) getString(R.string.st_ok) else getString(R.string.st_fail),
+                        detail,
+                        if (result.success) DoorStatusKind.Success else DoorStatusKind.Error
+                    )
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    setBle(
+                        getString(R.string.st_fail),
+                        e.resolveMessage(this),
+                        DoorStatusKind.Error
+                    )
                 }
             } finally {
                 busy.set(false)

@@ -20,9 +20,60 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 
     /**
+     * 仅用缓存的 sessionSecret 拉取最新凭证，不重新登录。
+     * 如果 sessionSecret 已过期（业务请求返回鉴权失败），抛出异常由调用方回落到完整登录流程。
+     */
+    fun refreshCredentialOnly(snapshot: DoorCredentialSnapshot): DoorCredentialSnapshot {
+        val detailData = businessGet(
+            baseUrl = snapshot.serverUrl,
+            sessionSecret = snapshot.sessionSecret,
+            path = "/webapi/v1/student/accommodation/details",
+            params = mutableMapOf(
+                "user_id" to snapshot.userId,
+                "identitycode" to snapshot.identityCode
+            )
+        )
+
+        val detailDoorLock = findChildObject(detailData, "door_lock")
+        var credentialId = findString(detailDoorLock ?: detailData, "credential_id", "credentialId")
+        val bleMac = findString(detailDoorLock ?: detailData, "ble_mac", "bleMac")
+        var credential = findString(detailDoorLock ?: detailData, "credential", "chain_key", "chainKey")
+
+        if (credential.isNullOrBlank()) {
+            val credentialData = businessGet(
+                baseUrl = snapshot.serverUrl,
+                sessionSecret = snapshot.sessionSecret,
+                path = "/webapi/v1/staff/door_lock/credentials",
+                params = mutableMapOf(
+                    "device_id" to snapshot.deviceId.toString(),
+                    "user_id" to snapshot.userId,
+                    "identitycode" to snapshot.identityCode
+                )
+            )
+            if (credentialId.isNullOrBlank()) {
+                credentialId = extractCredentialId(credentialData)
+            }
+            credential = findString(credentialData, "credential", "chain_key", "chainKey")
+        }
+
+        val normalizedCredential = credential
+            ?.uppercase()
+            ?.takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
+            ?: throw DoorApiException(rawText("服务器返回的凭证无效"))
+
+        return snapshot.copy(
+            credentialHex = normalizedCredential,
+            credentialId = credentialId?.takeIf { it.isNotBlank() } ?: snapshot.credentialId,
+            bleMac = bleMac?.takeIf { it.isNotBlank() } ?: snapshot.bleMac,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    /**
      * 支付宝 OAuth 登录：用外部支付宝 app 授权拿到的 auth_code 换登录态，
-     * 之后与密码登录走完全相同的业务流程。OAuth 没有可复用密码，snapshot 的 password 留空；
-     * 凭证过期时由 UI 回落到配置弹窗重新授权（refreshCredential / NFC 自动刷新均已对空密码判断，不会静默重登）。
+     * 之后与密码登录走完全相同的业务流程。snapshot 的 password 留空；
+     * 凭证过期时优先用 refreshCredentialOnly（缓存 sessionSecret）静默刷新，
+     * sessionSecret 过期才回落到完整登录流程。
      */
     fun syncCredentialWithAlipay(authCode: String): DoorCredentialSnapshot {
         val loginData = oauthLogin(authCode, OAUTH_TYPE_ALIPAY)
