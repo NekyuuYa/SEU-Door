@@ -29,6 +29,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import android.webkit.WebView
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 // 门锁返回这些码说明本地离线凭证已过期/需更新，自动重新同步
@@ -547,6 +548,11 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             dialogBinding.captchaWebView.stopLoading()
             configViews = null
             configDialog = null
+        }
+
+        // WebView 初始化会创建 ~4MB 的 Chromium 遥测文件，post 到首帧后立即删除
+        dialogBinding.captchaWebView.post {
+            File(getDataDir(), "app_webview/BrowserMetrics-spare.pma").delete()
         }
 
         configViews = dialogBinding
