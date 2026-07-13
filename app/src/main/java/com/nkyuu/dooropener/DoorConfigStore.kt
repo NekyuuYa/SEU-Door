@@ -31,6 +31,8 @@ class DoorConfigStore(context: Context) {
             .put(KEY_PASSWORD, normalized.password)
             .put(KEY_USER_ID, normalized.userId)
             .put(KEY_IDENTITY_CODE, normalized.identityCode)
+            .put(KEY_PROJECT_ID, normalized.projectId)
+            .put(KEY_APP_ID, normalized.appId)
             .put(KEY_DEVICE_ID, normalized.deviceId)
             .put(KEY_CREDENTIAL_ID, normalized.credentialId)
             .put(KEY_BLE_MAC, normalized.bleMac)
@@ -58,15 +60,15 @@ class DoorConfigStore(context: Context) {
     }
 
     fun hasUsableCredential(): Boolean {
-        return load() != null
+        return load()?.hasOfflineCredential() == true
     }
 
     private fun decodeEncryptedSnapshot(encrypted: String): DoorCredentialSnapshot {
         val json = JSONObject(cipher.decrypt(encrypted))
-        val credential = json.optString(KEY_CREDENTIAL)
-            .uppercase()
-            .takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
-            ?: throw LocalizedIOException(rawText("本地凭证无效"))
+        val credential = json.optString(KEY_CREDENTIAL).uppercase()
+        if (credential.isNotEmpty() && !credential.matches(Regex("^[0-9A-F]{64}$"))) {
+            throw LocalizedIOException(rawText("本地凭证无效"))
+        }
 
         return DoorCredentialSnapshot(
             serverUrl = json.optString(KEY_SERVER_URL, DoorApi.DEFAULT_SERVER_URL),
@@ -75,6 +77,8 @@ class DoorConfigStore(context: Context) {
             password = json.optString(KEY_PASSWORD),
             userId = json.optString(KEY_USER_ID),
             identityCode = json.optString(KEY_IDENTITY_CODE),
+            projectId = json.optInt(KEY_PROJECT_ID, DoorApi.PROJECT_ID),
+            appId = json.optInt(KEY_APP_ID, DoorApi.APP_ID),
             deviceId = json.optInt(KEY_DEVICE_ID),
             credentialId = json.optString(KEY_CREDENTIAL_ID),
             bleMac = json.optString(KEY_BLE_MAC),
@@ -100,6 +104,8 @@ class DoorConfigStore(context: Context) {
             password = preferences.getString(KEY_PASSWORD, "").orEmpty(),
             userId = preferences.getString(KEY_USER_ID, "").orEmpty(),
             identityCode = preferences.getString(KEY_IDENTITY_CODE, "").orEmpty(),
+            projectId = DoorApi.PROJECT_ID,
+            appId = DoorApi.APP_ID,
             deviceId = preferences.getInt(KEY_DEVICE_ID, 0),
             credentialId = preferences.getString(KEY_CREDENTIAL_ID, "").orEmpty(),
             bleMac = preferences.getString(KEY_BLE_MAC, "").orEmpty(),
@@ -117,6 +123,8 @@ class DoorConfigStore(context: Context) {
             .remove(KEY_PASSWORD)
             .remove(KEY_USER_ID)
             .remove(KEY_IDENTITY_CODE)
+            .remove(KEY_PROJECT_ID)
+            .remove(KEY_APP_ID)
             .remove(KEY_DEVICE_ID)
             .remove(KEY_CREDENTIAL_ID)
             .remove(KEY_BLE_MAC)
@@ -135,6 +143,8 @@ class DoorConfigStore(context: Context) {
         private const val KEY_PASSWORD = "password"
         private const val KEY_USER_ID = "user_id"
         private const val KEY_IDENTITY_CODE = "identity_code"
+        private const val KEY_PROJECT_ID = "project_id"
+        private const val KEY_APP_ID = "app_id"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_CREDENTIAL_ID = "credential_id"
         private const val KEY_BLE_MAC = "ble_mac"
@@ -151,6 +161,8 @@ data class DoorCredentialSnapshot(
     val password: String,
     val userId: String,
     val identityCode: String,
+    val projectId: Int,
+    val appId: Int,
     val deviceId: Int,
     val credentialId: String,
     val bleMac: String,
@@ -158,3 +170,11 @@ data class DoorCredentialSnapshot(
     val sessionSecret: String,
     val updatedAt: Long
 )
+
+fun DoorCredentialSnapshot.hasOfflineCredential(): Boolean {
+    return credentialHex.matches(Regex("^[0-9A-F]{64}$", RegexOption.IGNORE_CASE))
+}
+
+fun DoorCredentialSnapshot.requiresDigitalCredentialActivation(): Boolean {
+    return deviceId > 0 && credentialHex.isBlank() && sessionSecret.isNotBlank()
+}

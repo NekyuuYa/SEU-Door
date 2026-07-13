@@ -12,7 +12,6 @@ object DoorCrypto {
     private const val NFC_SUBCOMMAND: Byte = 0x0D
     private const val BLE_LENGTH_MARKER: Byte = 20
     private const val BLE_RESERVED: Byte = 0
-    private const val BLE_HEADER_TOTAL_LENGTH = 40
     private const val UINT_MASK = 0xFFFF_FFFFL
     private const val NFC_FRAME_HEADER_SIZE = 3
     private const val NFC_FRAME_CRC_SIZE = 1
@@ -172,9 +171,11 @@ object DoorCrypto {
         val pidBytes = littleEndianInt(projectId)
         val raw = pidBytes + credential
         return ByteArray(BLE_DATA_SIZE).apply {
-            this[0] = BLE_HEADER_TOTAL_LENGTH.toByte()
+            // The payload sent by 0x75 starts with the 4-byte door random value, followed by
+            // project id and chain key. The 0x74 length advertises that complete payload.
+            this[0] = (raw.size + 4).toByte()
             this[1] = 0
-            this[2] = ((BLE_HEADER_TOTAL_LENGTH + 14) / 15).toByte()
+            this[2] = ((raw.size + 4 + 14) / 15).toByte()
             this[3] = crc8(raw)
         }
     }

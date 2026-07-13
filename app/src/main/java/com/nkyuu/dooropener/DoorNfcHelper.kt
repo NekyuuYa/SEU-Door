@@ -60,6 +60,8 @@ object DoorNfcHelper {
 
     private const val CMD_TIMEOUT_MS = 1500   // 门锁处理+开门需要时间，给足超时
     private const val CMD_RETRIES = 3         // 原 app 也是最多重试 3 次
+    private const val ACTIVATION_TIMEOUT_MS = 3_000
+    private const val MAX_ACTIVATION_ROUNDS = 8
 
     /**
      * 联机式 NFC 门锁开门：全程一次 NfcA session。
@@ -101,6 +103,77 @@ object DoorNfcHelper {
             }
             throw lastErr ?: LocalizedIOException(rawText("门锁未返回有效响应"))
         }
+    }
+
+    /** Relays the original H5 create -> transceive -> parse activation loop. */
+    fun activateDigitalCredential(
+        tag: Tag,
+        snapshot: DoorCredentialSnapshot,
+        api: DoorApi = DoorApi(),
+        onProgress: (String) -> Unit = {}
+    ): DoorCredentialSnapshot {
+        clearDebug()
+        val tagId = tag.id.toHexCompact()
+        appendDebug("开始NFC数字钥匙激活 tag=$tagId 快照设备=${snapshot.deviceId} 凭证=${snapshot.credentialId}")
+        try {
+            return DoorNfc.withNfcA(tag) { nfcA ->
+                nfcA.timeout = ACTIVATION_TIMEOUT_MS
+                val deviceId = readDoorDeviceId(nfcA)
+                if (deviceId != snapshot.deviceId) {
+                    throw LocalizedIOException(
+                        rawText("标签 device_id=%1\$s，与已登录宿舍门锁 %2\$s 不一致", deviceId, snapshot.deviceId)
+                    )
+                }
+
+                var step = api.startNfcActivation(snapshot, deviceId)
+                appendDebug("激活create完成 凭证=${step.credentialId} 包数=${step.packets.size} 会话字段=${step.requestData.keys().asSequence().toList().joinToString(",")}")
+                repeat(MAX_ACTIVATION_ROUNDS) { round ->
+                    if (step.packets.isEmpty()) {
+                        val credentialHex = step.credentialHex
+                            ?: throw DoorApiException(rawText("门锁激活未返回本地凭证"))
+                        appendDebug("激活完成 轮次=${round + 1} 本地钥匙长度=${credentialHex.length}")
+                        return@withNfcA snapshot.copy(
+                            deviceId = deviceId,
+                            credentialId = step.credentialId,
+                            credentialHex = credentialHex,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    }
+
+                    val responses = ArrayList<String>(step.packets.size)
+                    step.packets.forEachIndexed { index, packet ->
+                        onProgress("正在发送激活数据 ${index + 1} / ${step.packets.size}…")
+                        val request = packet.hexToBytes()
+                        appendDebug("激活轮次=${round + 1} 发送 ${index + 1}/${step.packets.size}=${request.toHexCompact()}")
+                        val response = nfcA.transceive(request)
+                        if (response.isEmpty()) {
+                            throw LocalizedIOException(rawText("门锁未返回激活响应"))
+                        }
+                        val responseHex = response.toHexCompact()
+                        appendDebug("激活轮次=${round + 1} 响应 ${index + 1}/${step.packets.size}=$responseHex")
+                        responses += responseHex
+                    }
+                    appendDebug("提交激活parse 轮次=${round + 1} 响应数=${responses.size}")
+                    step = api.submitNfcActivationResponses(snapshot, step, responses)
+                    appendDebug("激活parse完成 下轮包数=${step.packets.size} 会话字段=${step.requestData.keys().asSequence().toList().joinToString(",")}")
+                }
+                throw DoorApiException(rawText("门锁激活轮次超限"))
+            }
+        } catch (exception: Exception) {
+            appendDebug("激活失败 ${exception.javaClass.simpleName}: ${exception.message}")
+            throw exception
+        } finally {
+            flushDebug(tagId)
+        }
+    }
+
+    private fun readDoorDeviceId(nfcA: android.nfc.tech.NfcA): Int {
+        val userMem = DoorNfc.readBytes(nfcA, 4, DoorNfc.DEFAULT_USER_BYTES)
+        val ndefMsgBytes = extractNdefMessageBytes(userMem)
+            ?: throw LocalizedIOException(rawText("标签里没有 NDEF 数据"))
+        val url = findDoorUrl(NdefMessage(ndefMsgBytes))
+            ?: throw LocalizedIOException(rawText("标签中无门锁 URL"))
+        return extractDeviceId(url) ?: throw LocalizedIOException(rawText("URL 中无设备 ID"))
     }
 
     /**
@@ -146,6 +219,7 @@ object DoorNfcHelper {
     fun appendDebug(msg: String) {
         debugLog.appendLine("[${System.currentTimeMillis() % 100000}] $msg")
         if (debugLog.length > 5000) debugLog.delete(0, debugLog.length - 3000)
+        DoorOfflineLog.append("NFC", msg)
     }
 
     fun flushDebug(tagId: String, context: android.content.Context? = null) {

@@ -31,6 +31,7 @@ object DoorBle {
     private const val COMMAND_REFETCH = 0x76
     private const val COMMAND_PACKET_READ = 0x77
     private const val COMMAND_OPEN = 0x78
+    private const val MAX_ACTIVATION_ROUNDS = 8
 
     private const val SCAN_TIMEOUT_MS = 3_000L
     private const val CONNECT_TIMEOUT_MS = 10_000L
@@ -59,6 +60,10 @@ object DoorBle {
         val session = GattSession(context, target.device, deviceId)
 
         try {
+            DoorOfflineLog.append(
+                "BLE",
+                "open start device=$deviceId localCredential=${snapshot.hasOfflineCredential()}"
+            )
             progress("正在连接 ${target.displayName}")
             session.connect()
 
@@ -66,6 +71,7 @@ object DoorBle {
                 context = context,
                 session = session,
                 deviceId = deviceId,
+                projectId = snapshot.projectId,
                 credentialHex = snapshot.credentialHex,
                 progress = progress
             )
@@ -73,8 +79,9 @@ object DoorBle {
             var updatedCredentialHex: String? = null
             var refreshedCredential = false
             if (openAttempt.resultCode == 27) {
+                DoorOfflineLog.append("BLE", "open requires credential refresh device=$deviceId")
                 progress("门锁要求刷新凭证")
-                val refresh = refreshCredential(context, session, deviceId, snapshot, progress)
+                val refresh = refreshCredential(context, session, deviceId, progress)
                 updatedCredentialHex = refresh.updatedCredentialHex
                 refreshedCredential = refresh.refreshed
                 progress("正在使用新凭证重试开门")
@@ -82,10 +89,12 @@ object DoorBle {
                     context = context,
                     session = session,
                     deviceId = deviceId,
+                    projectId = snapshot.projectId,
                     credentialHex = refresh.updatedCredentialHex,
                     progress = progress
                 )
             }
+            DoorOfflineLog.append("BLE", "open result device=$deviceId code=${openAttempt.resultCode}")
 
             val success = openAttempt.resultCode == 0 || openAttempt.resultCode == 23
             val note = buildString {
@@ -127,6 +136,79 @@ object DoorBle {
                 openRequest = openAttempt.openRequest,
                 openResponse = openAttempt.openResponse
             )
+        } finally {
+            session.close()
+        }
+    }
+
+    /** Mirrors the original H5 Bluetooth create -> raw write -> parse activation loop. */
+    @SuppressLint("MissingPermission")
+    fun activateDigitalCredential(
+        context: Context,
+        snapshot: DoorCredentialSnapshot,
+        api: DoorApi = DoorApi(),
+        progress: (String) -> Unit = {}
+    ): DoorCredentialSnapshot {
+        val deviceId = snapshot.deviceId.takeIf { it > 0 }
+            ?: throw DoorBleException("缺少 device_id，无法激活蓝牙数字钥匙")
+        var step = api.startBleActivation(snapshot, deviceId)
+        DoorOfflineLog.append(
+            "BLE",
+            "activation create device=$deviceId credential=${step.credentialId} packets=${step.packets.size}"
+        )
+
+        val target = findDoorDevice(context, snapshot, progress)
+        val session = GattSession(context, target.device, deviceId)
+        try {
+            progress("正在连接 ${target.displayName}")
+            session.connect()
+
+            repeat(MAX_ACTIVATION_ROUNDS) { round ->
+                if (step.packets.isEmpty()) {
+                    val credentialHex = step.credentialHex
+                        ?: throw DoorApiException(rawText("门锁激活未返回本地凭证"))
+                    DoorOfflineLog.append(
+                        "BLE",
+                        "activation complete round=${round + 1} credential=${step.credentialId}"
+                    )
+                    return snapshot.copy(
+                        deviceId = deviceId,
+                        credentialId = step.credentialId,
+                        credentialHex = credentialHex,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                }
+
+                val responses = ArrayList<String>(step.packets.size)
+                step.packets.forEachIndexed { index, packet ->
+                    progress("正在发送激活数据 ${index + 1}/${step.packets.size}")
+                    val request = packet.hexToBytes()
+                    DoorOfflineLog.append(
+                        "BLE",
+                        "activation tx round=${round + 1} packet=${index + 1}/${step.packets.size} ${request.toHexCompact()}"
+                    )
+                    val response = session.writeRawAndAwait(request)
+                    if (response.isEmpty()) {
+                        throw DoorBleException("门锁未返回激活响应")
+                    }
+                    val responseHex = response.toHexCompact()
+                    DoorOfflineLog.append(
+                        "BLE",
+                        "activation rx round=${round + 1} packet=${index + 1}/${step.packets.size} $responseHex"
+                    )
+                    responses += responseHex
+                }
+                DoorOfflineLog.append("BLE", "activation parse round=${round + 1} responses=${responses.size}")
+                step = api.submitBleActivationResponses(snapshot, step, responses)
+                DoorOfflineLog.append(
+                    "BLE",
+                    "activation parse complete round=${round + 1} nextPackets=${step.packets.size}"
+                )
+            }
+            throw DoorBleException("门锁激活轮次超限")
+        } catch (exception: Exception) {
+            DoorOfflineLog.append("BLE", "activation failed ${exception.javaClass.simpleName}: ${exception.message}")
+            throw exception
         } finally {
             session.close()
         }
@@ -307,11 +389,12 @@ object DoorBle {
         context: Context,
         session: GattSession,
         deviceId: Int,
+        projectId: Int,
         credentialHex: String,
         progress: (String) -> Unit
     ): BleOpenAttempt {
         progress("正在发送凭证头")
-        val headerPayload = DoorCrypto.buildBleHeaderPayload(DoorApi.PROJECT_ID, credentialHex)
+        val headerPayload = DoorCrypto.buildBleHeaderPayload(projectId, credentialHex)
         val headerRequest = DoorCrypto.buildBleCommand(
             deviceId = deviceId,
             commandType = COMMAND_HEADER,
@@ -326,7 +409,7 @@ object DoorBle {
         val ran = headerResponse.littleEndianIntAt(4)
 
         val packets = DoorCrypto.buildBleCredentialPackets(
-            projectId = DoorApi.PROJECT_ID,
+            projectId = projectId,
             credentialHex = credentialHex,
             ran = ran
         )
@@ -391,18 +474,13 @@ object DoorBle {
         context: Context,
         session: GattSession,
         deviceId: Int,
-        snapshot: DoorCredentialSnapshot,
         progress: (String) -> Unit
     ): CredentialRefreshResult {
-        if (snapshot.credentialId.isBlank()) {
-            throw DoorBleException("缺少 credential_id，无法刷新凭证")
-        }
-
         val refetchResponse = session.writeAndAwait(
             DoorCrypto.buildBleCommand(
                 deviceId = deviceId,
                 commandType = COMMAND_REFETCH,
-                data = DoorCrypto.buildBleRefetchPayload(snapshot.credentialId)
+                data = DoorCrypto.buildBleRefetchPayload(deviceId.toString())
             )
         )
         ensureBleResponse(refetchResponse, COMMAND_REFETCH, "凭证刷新")
@@ -418,6 +496,10 @@ object DoorBle {
         if (packetCount <= 0 || credentialLength <= 0) {
             throw DoorBleException("门锁返回的刷新参数无效")
         }
+        DoorOfflineLog.append(
+            "BLE",
+            "credential refresh device=$deviceId packets=$packetCount length=$credentialLength"
+        )
 
         val packetMap = linkedMapOf<Int, ByteArray>()
         repeat(packetCount) { requestedIndex ->
@@ -449,6 +531,7 @@ object DoorBle {
         if (!updatedHex.matches(Regex("^[0-9A-F]{64}$"))) {
             throw DoorBleException("门锁返回的新凭证格式无效")
         }
+        DoorOfflineLog.append("BLE", "credential refresh complete device=$deviceId length=${updatedHex.length}")
 
         return CredentialRefreshResult(
             updatedCredentialHex = updatedHex,
@@ -730,6 +813,13 @@ object DoorBle {
         }
 
         fun writeAndAwait(frame: ByteArray): BleResponse {
+            return DoorCrypto.parseBleResponse(
+                deviceId = deviceId,
+                frame = writeRawAndAwait(frame)
+            )
+        }
+
+        fun writeRawAndAwait(frame: ByteArray): ByteArray {
             val connectedGatt = gatt ?: throw DoorBleException("蓝牙未连接")
             val characteristic = writeCharacteristic ?: throw DoorBleException("写入通道未就绪")
             notificationEvents.clear()
@@ -764,10 +854,7 @@ object DoorBle {
                 throw DoorBleException("收到未知蓝牙响应")
             }
 
-            return DoorCrypto.parseBleResponse(
-                deviceId = deviceId,
-                frame = notification.value
-            )
+            return notification.value
         }
 
         fun close() {

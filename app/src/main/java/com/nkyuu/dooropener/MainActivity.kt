@@ -133,6 +133,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         views = MainViews(findViewById(android.R.id.content))
 
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        DoorOfflineLog.initialize(applicationContext)
+        DoorOfflineLog.append("APP", "MainActivity created")
         store = DoorConfigStore(this)
         hasCredential = store.hasUsableCredential()
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
@@ -306,7 +308,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         }
         renderStatus(selectedTab, status)
         views.bleOpenButton.visibility = if (selectedTab == MainTab.Ble) View.VISIBLE else View.GONE
-        views.bleOpenButton.isEnabled = !isBusyState && hasCredential
+        val activationPending = store.load()?.requiresDigitalCredentialActivation() == true
+        views.bleOpenButton.isEnabled = !isBusyState && (hasCredential || activationPending)
         views.bleFobButton.visibility = if (selectedTab == MainTab.Ble) View.VISIBLE else View.GONE
         views.bleFobButton.isEnabled = !isBusyState && hasCredential
         views.refreshButton.isEnabled = !isBusyState
@@ -519,7 +522,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                         )
                         store.save(fresh)
                         runOnUiThread {
-                            hasCredential = true
+                            hasCredential = fresh.hasOfflineCredential()
                             updateIdleStatus()
                             Toast.makeText(this, getString(R.string.tst_syn), Toast.LENGTH_SHORT).show()
                             dialog.dismiss()
@@ -649,6 +652,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         if (busy.get()) return
 
         val snapshot = store.load()
+        val activationPending = snapshot?.requiresDigitalCredentialActivation() == true
         val credentialPreview = snapshot?.credentialHex.orEmpty()
         val account = snapshot?.let {
             getString(R.string.dt_dev, it.phone, it.deviceId, credentialPreview, it.credentialId)
@@ -665,6 +669,11 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                 getString(R.string.err_nfc2),
                 DoorStatusKind.Error
             )
+            activationPending -> setNfc(
+                getString(R.string.st_hold),
+                rawText("数字钥匙待激活，可贴近门锁或使用蓝牙完成激活").resolve(this),
+                DoorStatusKind.Idle
+            )
             !hasCredential -> setNfc(
                 getString(R.string.st_fail),
                 getString(R.string.err_syn),
@@ -677,7 +686,13 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             )
         }
 
-        if (!hasCredential) {
+        if (activationPending) {
+            setBle(
+                getString(R.string.st_ble),
+                rawText("数字钥匙待激活，点击开始使用蓝牙激活").resolve(this),
+                DoorStatusKind.Idle
+            )
+        } else if (!hasCredential) {
             setBle(
                 getString(R.string.st_ble),
                 getString(R.string.err_syn),
@@ -725,7 +740,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                 }
                 store.save(fresh)
                 runOnUiThread {
-                    hasCredential = true
+                    hasCredential = fresh.hasOfflineCredential()
                     Toast.makeText(this, getString(R.string.tst_rfr), Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -758,6 +773,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     private fun startAlipayLogin() {
         if (!busy.compareAndSet(false, true)) return
 
+        DoorOfflineLog.append("AUTH", "Alipay login requested")
         setBusyState(true)
         Toast.makeText(this, getString(R.string.oauth_loading), Toast.LENGTH_SHORT).show()
 
@@ -767,12 +783,17 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                 val authCode = DoorAlipayAuth.authorize(this, authInfo)
                 val fresh = DoorApi().syncCredentialWithAlipay(authCode)
                 store.save(fresh)
+                DoorOfflineLog.append(
+                    "AUTH",
+                    "Alipay login complete project=${fresh.projectId} app=${fresh.appId} device=${fresh.deviceId} credentialPresent=${fresh.hasOfflineCredential()}"
+                )
                 runOnUiThread {
-                    hasCredential = true
+                    hasCredential = fresh.hasOfflineCredential()
                     Toast.makeText(this, getString(R.string.tst_syn), Toast.LENGTH_SHORT).show()
                     configDialog?.dismiss()
                 }
             } catch (e: Exception) {
+                DoorOfflineLog.append("AUTH", "Alipay login failed ${e.javaClass.simpleName}: ${e.message}")
                 runOnUiThread {
                     if (configDialog?.isShowing != true) {
                         showConfigDialog()
@@ -815,6 +836,11 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     /** ReaderMode 回调在子线程触发，所有 UI 更新走 runOnUiThread。 */
     private fun handleTag(tag: Tag) {
         if (!hasCredential) {
+            val pendingSnapshot = store.load()?.takeIf { it.requiresDigitalCredentialActivation() }
+            if (pendingSnapshot != null) {
+                activatePendingCredential(tag, pendingSnapshot)
+                return
+            }
             runOnUiThread {
                 setNfc(
                     getString(R.string.st_fail),
@@ -884,12 +910,55 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         }.start()
     }
 
+    private fun activatePendingCredential(tag: Tag, snapshot: DoorCredentialSnapshot) {
+        if (!busy.compareAndSet(false, true)) return
+
+        runOnUiThread {
+            setBusyState(true)
+            setNfc(
+                getString(R.string.st_hold),
+                rawText("正在激活数字钥匙").resolve(this),
+                DoorStatusKind.Busy
+            )
+        }
+
+        Thread {
+            try {
+                val fresh = DoorNfcHelper.activateDigitalCredential(tag, snapshot) { progress ->
+                    runOnUiThread {
+                        setNfc(getString(R.string.st_hold), progress, DoorStatusKind.Busy)
+                    }
+                }
+                store.save(fresh)
+                runOnUiThread {
+                    hasCredential = true
+                    setNfc(
+                        getString(R.string.st_ok),
+                        rawText("数字钥匙激活成功").resolve(this),
+                        DoorStatusKind.Success
+                    )
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    setNfc(
+                        getString(R.string.st_fail),
+                        e.resolveMessage(this),
+                        DoorStatusKind.Error
+                    )
+                }
+            } finally {
+                busy.set(false)
+                runOnUiThread { setBusyState(false) }
+            }
+        }.start()
+    }
+
     private fun processDoorTag(tag: Tag, snapshot: DoorCredentialSnapshot): DoorOpenResult {
         val uid = tag.id.toHexCompact()
         DoorNfcHelper.clearDebug()
         DoorNfcHelper.appendDebug("开始NFC开门 uid=$uid")
         try {
-            val outcome = DoorNfcHelper.openDoorSingleSession(tag, snapshot.credentialHex, DoorApi.PROJECT_ID)
+            val outcome = DoorNfcHelper.openDoorSingleSession(tag, snapshot.credentialHex, snapshot.projectId)
             val decoded = outcome.response
             DoorNfcHelper.appendDebug("解析结果: code=${decoded.resultCode} success=${decoded.isSuccess}")
             DoorNfcHelper.flushDebug(uid, this)
@@ -1009,7 +1078,11 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         setBusyState(true)
         setBle(
             getString(R.string.st_ble),
-            getString(R.string.sd_prep),
+            if (snapshot.requiresDigitalCredentialActivation()) {
+                rawText("正在通过蓝牙初始化数字钥匙").resolve(this)
+            } else {
+                getString(R.string.sd_prep)
+            },
             DoorStatusKind.Busy
         )
 
@@ -1022,6 +1095,9 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                 }
                 result.updatedCredentialHex?.let { store.updateCredential(it) }
                 runOnUiThread {
+                    if (result.updatedCredentialHex != null) {
+                        hasCredential = true
+                    }
                     val noteSuffix = result.note?.let { getString(R.string.dt_nop, it) }.orEmpty()
                     setBle(
                         if (result.success) getString(R.string.st_ok) else getString(R.string.st_fail),

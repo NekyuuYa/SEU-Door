@@ -1,6 +1,7 @@
 package com.nkyuu.dooropener
 
 import android.util.Base64
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -24,9 +25,40 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
      * 如果 sessionSecret 已过期（业务请求返回鉴权失败），抛出异常由调用方回落到完整登录流程。
      */
     fun refreshCredentialOnly(snapshot: DoorCredentialSnapshot): DoorCredentialSnapshot {
+        val keyList = fetchStaffCredentials(
+            baseUrl = snapshot.serverUrl,
+            sessionSecret = snapshot.sessionSecret,
+            projectId = snapshot.projectId,
+            appId = snapshot.appId,
+            userId = snapshot.userId,
+            identityCode = snapshot.identityCode
+        )
+        val keyRecord = firstRecord(keyList)
+        val keyCredential = normalizeCredentialHex(
+            findString(keyRecord ?: keyList, "credential", "chain_key", "chainKey")
+        )
+        if (keyCredential != null) {
+            val keyDeviceId = findPositiveInt(keyRecord ?: keyList, "device_id", "deviceId")
+                ?: snapshot.deviceId
+            val keyCredentialId = findString(keyRecord ?: keyList, "credential_id", "credentialId", "id")
+                ?: snapshot.credentialId
+            DoorOfflineLog.append(
+                "AUTH",
+                "staff credentials refresh device=$keyDeviceId credential=true"
+            )
+            return snapshot.copy(
+                deviceId = keyDeviceId,
+                credentialId = keyCredentialId,
+                credentialHex = keyCredential,
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+
         val detailData = businessGet(
             baseUrl = snapshot.serverUrl,
             sessionSecret = snapshot.sessionSecret,
+            projectId = snapshot.projectId,
+            appId = snapshot.appId,
             path = "/webapi/v1/student/accommodation/details",
             params = mutableMapOf(
                 "user_id" to snapshot.userId,
@@ -43,6 +75,8 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             val credentialData = businessGet(
                 baseUrl = snapshot.serverUrl,
                 sessionSecret = snapshot.sessionSecret,
+                projectId = snapshot.projectId,
+                appId = snapshot.appId,
                 path = "/webapi/v1/staff/door_lock/credentials",
                 params = mutableMapOf(
                     "device_id" to snapshot.deviceId.toString(),
@@ -56,10 +90,9 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             credential = findString(credentialData, "credential", "chain_key", "chainKey")
         }
 
-        val normalizedCredential = credential
-            ?.uppercase()
-            ?.takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
-            ?: throw DoorApiException(rawText("服务器返回的凭证无效"))
+        val normalizedCredential = normalizeCredentialHex(credential)
+            ?: snapshot.credentialHex.takeIf { it.isNotBlank() }
+            ?: ""
 
         return snapshot.copy(
             credentialHex = normalizedCredential,
@@ -77,6 +110,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
      */
     fun syncCredentialWithAlipay(authCode: String): DoorCredentialSnapshot {
         val loginData = oauthLogin(authCode, OAUTH_TYPE_ALIPAY)
+        DoorOfflineLog.append("AUTH", "OAuth response fields=${describeObjectKeys(loginData)}")
         val phone = findString(loginData, "phone").orEmpty()
         return buildSnapshotFromLogin(loginData, phone = phone, password = "")
     }
@@ -111,12 +145,10 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 
     private fun oauthLogin(authCode: String, oauthType: String): Any {
-        // OAuth 登录：GET + base64 编码的嵌套参数（原 app 的 beforeRequest 逻辑）。
+        // Match the original H5 bridge fields exactly. Its Android bridge leaves deviceToken blank.
         val systemInfo = JSONObject().apply {
-            put("appVersion", "1.0.0")
-            put("systemType", "android")
-            put("systemVersion", android.os.Build.VERSION.RELEASE)
-            put("deviceModel", android.os.Build.MODEL)
+            put("appVersion", "3.11.51")
+            put("systemType", "Android")
             put("deviceToken", "")
         }
         val authInfo = JSONObject().apply {
@@ -131,7 +163,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             params = mutableMapOf(
                 "base64_systemInfo" to b64Sys,
                 "base64_authInfo" to b64Auth,
-                "app_version" to "1.0.0"
+                "app_version" to "3.11.51"
             ),
             nonceLength = AUTH_NONCE_LENGTH
         )
@@ -153,10 +185,20 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         val identityCode = requireString(loginData, "identity_code", "identitycode")
         val serverAddr = requireString(loginData, "server_addr")
         val sessionSecret = requireString(loginData, "session_secret")
+        val serverInfo = findChildObject(loginData, "server_info")
+        serverInfo?.let { logProjectMetadata("server_info", it) }
+        val serverProjectId = findPositiveInt(serverInfo ?: loginData, "server_appid", "project_id", "projectId")
+        val serverAppId = findPositiveInt(serverInfo ?: loginData, "server_id", "app_id", "appId")
+        var projectId = serverProjectId
+            ?: PROJECT_ID
+        var appId = serverAppId
+            ?: APP_ID
 
         val detailData = businessGet(
             baseUrl = serverAddr,
             sessionSecret = sessionSecret,
+            projectId = projectId,
+            appId = appId,
             path = "/webapi/v1/student/accommodation/details",
             params = mutableMapOf(
                 "user_id" to userId,
@@ -170,33 +212,114 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         val bleMac = findString(detailDoorLock ?: detailData, "ble_mac", "bleMac")
         var credential = findString(detailDoorLock ?: detailData, "credential", "chain_key", "chainKey")
 
+        // The official H5 obtains door-lock records from this endpoint. Its first record holds
+        // the server-issued local chain key on a fresh installation.
+        var keyListData: Any? = null
+        if (deviceId.isNullOrBlank() || credential.isNullOrBlank()) {
+            keyListData = fetchStaffCredentials(
+                baseUrl = serverAddr,
+                sessionSecret = sessionSecret,
+                projectId = projectId,
+                appId = appId,
+                userId = userId,
+                identityCode = identityCode
+            )
+            val keyRecord = firstRecord(keyListData)
+            deviceId = deviceId ?: findString(keyRecord ?: keyListData, "device_id", "deviceId")
+            credentialId = credentialId ?: findString(keyRecord ?: keyListData, "credential_id", "credentialId", "id")
+            credential = credential ?: findString(keyRecord ?: keyListData, "credential", "chain_key", "chainKey")
+            DoorOfflineLog.append(
+                "AUTH",
+                "staff credentials device=${deviceId.orEmpty()} credential=${normalizeCredentialHex(credential) != null}"
+            )
+        }
+
+        // The current service separates accommodation and lock records. Older deployments
+        // embedded door_lock directly in accommodation/details, so keep that path first.
+        var credentialData: Any? = null
+        if (deviceId.isNullOrBlank()) {
+            val roomId = findString(detailData, "room_id", "roomId")
+            if (!roomId.isNullOrBlank()) {
+                val lockList = businessGet(
+                    baseUrl = serverAddr,
+                    sessionSecret = sessionSecret,
+                    projectId = projectId,
+                    appId = appId,
+                    path = DOOR_LOCK_LIST_PATH,
+                    params = mutableMapOf(
+                        "room_id" to roomId,
+                        "user_id" to userId,
+                        "identitycode" to identityCode
+                    )
+                )
+                val lock = firstRow(lockList)
+                deviceId = findString(lock ?: lockList, "device_id", "deviceId")
+                credentialId = credentialId ?: findString(lock ?: lockList, "credential_id", "credentialId")
+                credential = credential ?: findString(lock ?: lockList, "credential", "chain_key", "chainKey")
+            }
+        }
+
+        // Some deployments return an empty room lock list but allow listing this account's
+        // door-lock credentials without a device_id. Those rows carry the assigned device id.
+        if (deviceId.isNullOrBlank()) {
+            credentialData = fetchDoorLockCredentials(
+                baseUrl = serverAddr,
+                sessionSecret = sessionSecret,
+                deviceId = null,
+                userId = userId,
+                identityCode = identityCode,
+                projectId = projectId,
+                appId = appId
+            )
+            deviceId = findString(credentialData, "device_id", "deviceId")
+            credentialId = credentialId ?: extractCredentialId(credentialData)
+            credential = credential ?: findString(credentialData, "credential", "chain_key", "chainKey")
+        }
+
         if (deviceId.isNullOrBlank()) {
             throw DoorApiException(rawText("服务器返回中缺少 device_id"))
         }
 
         if (credential.isNullOrBlank()) {
-            val credentialData = businessGet(
+            val data = credentialData ?: fetchDoorLockCredentials(
                 baseUrl = serverAddr,
                 sessionSecret = sessionSecret,
-                path = "/webapi/v1/staff/door_lock/credentials",
-                params = mutableMapOf(
-                    "device_id" to deviceId,
-                    "user_id" to userId,
-                    "identitycode" to identityCode
-                )
+                deviceId = deviceId,
+                userId = userId,
+                identityCode = identityCode,
+                projectId = projectId,
+                appId = appId
             )
             if (credentialId.isNullOrBlank()) {
-                credentialId = extractCredentialId(credentialData)
+                credentialId = extractCredentialId(data)
             }
-            credential = findString(credentialData, "credential", "chain_key", "chainKey")
+            credential = findString(data, "credential", "chain_key", "chainKey")
         }
 
         val deviceIdInt = deviceId.toIntOrNull()
             ?: throw DoorApiException(rawText("device_id 不是合法整数: $deviceId"))
-        val normalizedCredential = credential
-            ?.uppercase()
-            ?.takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
-            ?: throw DoorApiException(rawText("服务器返回的凭证无效"))
+
+        // OAuth login responses from older API deployments omit server_info. The original H5
+        // resolves that case through the platform's device-to-project lookup.
+        if (serverProjectId == null || serverAppId == null) {
+            runCatching { fetchProjectByDeviceId(deviceIdInt) }
+                .onSuccess { projectInfo ->
+                    logProjectMetadata("project_lookup", projectInfo)
+                    findPositiveInt(projectInfo, "server_appid", "project_id", "projectId")?.let {
+                        projectId = it
+                    }
+                    findPositiveInt(projectInfo, "server_id", "app_id", "appId")?.let {
+                        appId = it
+                    }
+                    DoorOfflineLog.append("AUTH", "project lookup device=$deviceIdInt project=$projectId app=$appId")
+                }
+                .onFailure { error ->
+                    DoorOfflineLog.append("AUTH", "project lookup failed ${error.javaClass.simpleName}")
+                }
+        }
+        // Newer servers return credential-record metadata here. The offline chain key arrives
+        // only after the NFC activation exchange and is intentionally blank until then.
+        val normalizedCredential = normalizeCredentialHex(credential).orEmpty()
 
         return DoorCredentialSnapshot(
             serverUrl = normalizeServerUrl(serverAddr),
@@ -204,6 +327,8 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             password = password,
             userId = userId,
             identityCode = identityCode,
+            projectId = projectId,
+            appId = appId,
             deviceId = deviceIdInt,
             credentialId = credentialId.orEmpty(),
             bleMac = bleMac.orEmpty(),
@@ -253,35 +378,143 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
     private fun captchaError() = DoorApiException(rawText("验证码获取失败"))
 
-    fun fetchActivationPayload(snapshot: DoorCredentialSnapshot, deviceId: Int): ByteArray {
+    fun startNfcActivation(snapshot: DoorCredentialSnapshot, deviceId: Int): DoorNfcActivationStep {
+        return startDigitalCredentialActivation(snapshot, deviceId, "nfc", "1")
+    }
+
+    /** Starts the original H5 Bluetooth digital-key activation exchange. */
+    fun startBleActivation(snapshot: DoorCredentialSnapshot, deviceId: Int): DoorNfcActivationStep {
+        return startDigitalCredentialActivation(snapshot, deviceId, "ble", "112")
+    }
+
+    private fun startDigitalCredentialActivation(
+        snapshot: DoorCredentialSnapshot,
+        deviceId: Int,
+        transport: String,
+        command: String
+    ): DoorNfcActivationStep {
+        val credentialId = findOrCreateDigitalCredential(snapshot, deviceId)
         val data = businessGet(
             baseUrl = snapshot.serverUrl,
             sessionSecret = snapshot.sessionSecret,
+            projectId = snapshot.projectId,
+            appId = snapshot.appId,
             path = "/webapi/v1/door_lock/command/create",
             params = mutableMapOf(
                 "device_id" to deviceId.toString(),
-                "command" to "1",
-                "type" to "nfc",
-                "credential_id" to snapshot.credentialId,
+                "command" to command,
+                "type" to transport,
+                "credential_id" to credentialId,
                 "user_id" to snapshot.userId,
                 "identitycode" to snapshot.identityCode
             )
         )
+        return parseNfcActivationStep(data, credentialId)
+    }
 
-        val payloadHex = when (data) {
-            is String -> data.trim()
-            else -> findString(data, "payload")
-        }?.uppercase()?.takeIf { it.matches(Regex("^[0-9A-F]+$")) && it.length % 2 == 0 }
+    fun submitNfcActivationResponses(
+        snapshot: DoorCredentialSnapshot,
+        step: DoorNfcActivationStep,
+        responses: List<String>
+    ): DoorNfcActivationStep {
+        return submitDigitalCredentialActivationResponses(snapshot, step, responses, "nfc")
+    }
+
+    /** Submits one complete round of raw Bluetooth responses and returns the next server step. */
+    fun submitBleActivationResponses(
+        snapshot: DoorCredentialSnapshot,
+        step: DoorNfcActivationStep,
+        responses: List<String>
+    ): DoorNfcActivationStep {
+        return submitDigitalCredentialActivationResponses(snapshot, step, responses, "ble")
+    }
+
+    private fun submitDigitalCredentialActivationResponses(
+        snapshot: DoorCredentialSnapshot,
+        step: DoorNfcActivationStep,
+        responses: List<String>,
+        transport: String
+    ): DoorNfcActivationStep {
+        if (responses.isEmpty()) {
+            throw DoorApiException(rawText("门锁未返回激活响应"))
+        }
+        val params = step.requestData.toBusinessParams().apply {
+            put("payload", responses.joinToString(","))
+            put("type", transport)
+            put("user_id", snapshot.userId)
+            put("identitycode", snapshot.identityCode)
+        }
+        val data = businessPost(
+            baseUrl = snapshot.serverUrl,
+            sessionSecret = snapshot.sessionSecret,
+            projectId = snapshot.projectId,
+            appId = snapshot.appId,
+            path = "/webapi/v1/door_lock/command/parse",
+            params = params
+        )
+        return parseNfcActivationStep(data, step.credentialId)
+    }
+
+    private fun findOrCreateDigitalCredential(snapshot: DoorCredentialSnapshot, deviceId: Int): String {
+        if (snapshot.credentialId.isNotBlank()) return snapshot.credentialId
+
+        val credentials = fetchDoorLockCredentials(
+            baseUrl = snapshot.serverUrl,
+            sessionSecret = snapshot.sessionSecret,
+            deviceId = deviceId.toString(),
+            userId = snapshot.userId,
+            identityCode = snapshot.identityCode,
+            projectId = snapshot.projectId,
+            appId = snapshot.appId
+        )
+        extractDigitalCredentialId(credentials)?.let { return it }
+
+        val created = businessPost(
+            baseUrl = snapshot.serverUrl,
+            sessionSecret = snapshot.sessionSecret,
+            projectId = snapshot.projectId,
+            appId = snapshot.appId,
+            path = "/webapi/v1/door_lock/credential/create",
+            params = mutableMapOf(
+                "device_id" to deviceId.toString(),
+                "type" to "3",
+                "value" to random.nextInt(1_000_000).toString().padStart(6, '0'),
+                "user_id" to snapshot.userId,
+                "identitycode" to snapshot.identityCode
+            )
+        )
+        return extractCredentialId(created)
+            ?: throw DoorApiException(rawText("服务器未返回数字钥匙 ID"))
+    }
+
+    private fun parseNfcActivationStep(data: Any, fallbackCredentialId: String): DoorNfcActivationStep {
+        val root = data as? JSONObject
             ?: throw DoorApiException(rawText("服务器未返回合法的激活数据"))
-
-        return payloadHex.hexToBytes()
+        val payload = root.optString("payload")
+        val packets = if (payload.isBlank()) {
+            emptyList()
+        } else {
+            payload.split(',').map { it.trim() }.filter { it.isNotEmpty() }.onEach { packet ->
+                if (!packet.matches(Regex("^[0-9A-F]+$", RegexOption.IGNORE_CASE)) || packet.length % 2 != 0) {
+                    throw DoorApiException(rawText("服务器返回的激活数据格式无效"))
+                }
+            }
+        }
+        val credentialHex = normalizeCredentialHex(
+            findString(root, "code", "credential", "chain_key", "chainKey", "secret_key")
+        )
+        val credentialId = findString(root, "credential_id", "credentialId", "id")
+            ?: fallbackCredentialId
+        return DoorNfcActivationStep(root, packets, credentialId, credentialHex)
     }
 
     private fun authGet(path: String, params: MutableMap<String, String>, nonceLength: Int): Any {
         val signedParams = signParams(
             params = params,
             secret = AUTH_SIGN_SECRET,
-            nonceLength = nonceLength
+            nonceLength = nonceLength,
+            projectId = null,
+            appId = null
         )
         return performGet(
             baseUrl = normalizeServerUrl(authServerUrl),
@@ -300,7 +533,9 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         val signedParams = signParams(
             params = params,
             secret = AUTH_SIGN_SECRET,
-            nonceLength = nonceLength
+            nonceLength = nonceLength,
+            projectId = null,
+            appId = null
         )
         return performGetRaw(
             baseUrl = normalizeServerUrl(authServerUrl),
@@ -335,13 +570,17 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     private fun businessGet(
         baseUrl: String,
         sessionSecret: String,
+        projectId: Int = PROJECT_ID,
+        appId: Int = APP_ID,
         path: String,
         params: MutableMap<String, String>
     ): Any {
         val signedParams = signParams(
             params = params,
             secret = sessionSecret,
-            nonceLength = BUSINESS_NONCE_LENGTH
+            nonceLength = BUSINESS_NONCE_LENGTH,
+            projectId = projectId,
+            appId = appId
         )
         return performGet(
             baseUrl = normalizeServerUrl(baseUrl),
@@ -350,11 +589,101 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         )
     }
 
+    private fun businessPost(
+        baseUrl: String,
+        sessionSecret: String,
+        projectId: Int = PROJECT_ID,
+        appId: Int = APP_ID,
+        path: String,
+        params: MutableMap<String, String>
+    ): Any {
+        val signedParams = signParams(
+            params = params,
+            secret = sessionSecret,
+            nonceLength = BUSINESS_NONCE_LENGTH,
+            projectId = projectId,
+            appId = appId
+        )
+        return performPost(
+            baseUrl = normalizeServerUrl(baseUrl),
+            path = path,
+            params = signedParams
+        )
+    }
+
+    private fun fetchDoorLockCredentials(
+        baseUrl: String,
+        sessionSecret: String,
+        deviceId: String?,
+        userId: String,
+        identityCode: String,
+        projectId: Int,
+        appId: Int
+    ): Any {
+        val params = mutableMapOf<String, String>().apply {
+            deviceId?.takeIf { it.isNotBlank() }?.let { put("device_id", it) }
+            put("user_id", userId)
+            put("identitycode", identityCode)
+        }
+        return businessGet(
+            baseUrl = baseUrl,
+            sessionSecret = sessionSecret,
+            projectId = projectId,
+            appId = appId,
+            path = "/webapi/v1/staff/door_lock/credentials",
+            params = params
+        )
+    }
+
+    private fun fetchStaffCredentials(
+        baseUrl: String,
+        sessionSecret: String,
+        projectId: Int,
+        appId: Int,
+        userId: String,
+        identityCode: String
+    ): Any {
+        return businessGet(
+            baseUrl = baseUrl,
+            sessionSecret = sessionSecret,
+            projectId = projectId,
+            appId = appId,
+            path = "/webapi/v1/staff/credentials",
+            params = mutableMapOf(
+                "user_id" to userId,
+                "identitycode" to identityCode
+            )
+        )
+    }
+
+    private fun fetchProjectByDeviceId(deviceId: Int): Any {
+        return authGet(
+            path = "/webapi/project/get_by_device_id",
+            params = mutableMapOf("device_id" to deviceId.toString()),
+            nonceLength = AUTH_NONCE_LENGTH
+        )
+    }
+
     private fun performGet(baseUrl: String, path: String, params: Map<String, String>): Any {
         val query = encodeParams(params)
         val connection = openConnection(baseUrl, "$path?$query")
         try {
             connection.requestMethod = "GET"
+            return readEnvelope(connection)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun performPost(baseUrl: String, path: String, params: Map<String, String>): Any {
+        val body = encodeParams(params).toByteArray(Charsets.UTF_8)
+        val connection = openConnection(baseUrl, path)
+        try {
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(body.size)
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connection.outputStream.use { it.write(body) }
             return readEnvelope(connection)
         } finally {
             connection.disconnect()
@@ -376,10 +705,12 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     private fun signParams(
         params: MutableMap<String, String>,
         secret: String,
-        nonceLength: Int
+        nonceLength: Int,
+        projectId: Int? = PROJECT_ID,
+        appId: Int? = APP_ID
     ): Map<String, String> {
-        params["pid"] = PROJECT_ID.toString()
-        params["appid"] = APP_ID.toString()
+        projectId?.let { params["pid"] = it.toString() }
+        appId?.let { params["appid"] = it.toString() }
         params["timestamp"] = (System.currentTimeMillis() / 1000L).toString()
         params["noncestr"] = randomNonce(nonceLength)
 
@@ -414,6 +745,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         val statusCode = connection.responseCode
         val body = readBody(connection, statusCode)
         if (body.isBlank()) {
+            DoorOfflineLog.append("API", "HTTP $statusCode ${connection.url.path} empty response")
             throw DoorApiException(rawText("服务器返回空响应 (HTTP %1\$s)", statusCode))
         }
 
@@ -426,6 +758,14 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         if (!isSuccess(root)) {
             val serverMessage = extractServerMessage(root)
             val nonBlankServerMessage = serverMessage?.takeIf { it.isNotBlank() }
+            val failureLog = "HTTP $statusCode ${connection.url.path} result=false " +
+                "err_msg=${nonBlankServerMessage.orEmpty().replace('\n', ' ').take(256)} " +
+                "data=${summarizeEnvelopeData(root)}"
+            DoorOfflineLog.append("API", failureLog)
+            Log.w(
+                "DoorApi",
+                failureLog
+            )
             throw DoorApiException(
                 nonBlankServerMessage
                     ?.let { rawText(it) }
@@ -439,6 +779,20 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         }
 
         return decodeData(root.get("data"))
+    }
+
+    private fun summarizeEnvelopeData(root: JSONObject): String {
+        if (!root.has("data") || root.isNull("data")) return "null"
+        return when (val data = root.opt("data")) {
+            is JSONObject -> {
+                val keys = data.keys().asSequence().toList().sorted().joinToString(",")
+                "object($keys)"
+            }
+
+            is JSONArray -> "array(${data.length()})"
+            is String -> "string(${data.length})"
+            else -> data.javaClass.simpleName
+        }
     }
 
     private fun readBody(connection: HttpURLConnection, resolvedStatusCode: Int? = null): String {
@@ -544,8 +898,71 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         return (node as? JSONObject)?.optJSONObject(key)
     }
 
+    private fun findPositiveInt(node: Any, vararg keys: String): Int? {
+        return findString(node, *keys)?.toIntOrNull()?.takeIf { it > 0 }
+    }
+
+    private fun describeObjectKeys(node: Any): String {
+        return when (node) {
+            is JSONObject -> node.keys().asSequence().toList().sorted().joinToString(",")
+            is JSONArray -> "array(${node.length()})"
+            else -> node.javaClass.simpleName
+        }
+    }
+
+    private fun logProjectMetadata(source: String, node: Any) {
+        val ids = listOf("server_appid", "server_id", "project_id", "app_id", "id")
+            .joinToString(",") { key -> "$key=${findString(node, key).orEmpty()}" }
+        DoorOfflineLog.append("AUTH", "$source fields=${describeObjectKeys(node)} ids=$ids")
+    }
+
+    private fun firstRow(node: Any): JSONObject? {
+        return (node as? JSONObject)
+            ?.optJSONArray("rows")
+            ?.optJSONObject(0)
+    }
+
+    private fun firstRecord(node: Any): JSONObject? {
+        return when (node) {
+            is JSONArray -> node.optJSONObject(0)
+            is JSONObject -> node.optJSONArray("rows")?.optJSONObject(0)
+                ?: node.optJSONArray("data")?.optJSONObject(0)
+                ?: node
+            else -> null
+        }
+    }
+
+    private fun normalizeCredentialHex(value: String?): String? {
+        return value
+            ?.trim()
+            ?.uppercase()
+            ?.takeIf { it.matches(Regex("^[0-9A-F]{64}$")) }
+    }
+
+    private fun extractDigitalCredentialId(node: Any): String? {
+        val rows = (node as? JSONObject)?.optJSONArray("rows") ?: return null
+        for (index in 0 until rows.length()) {
+            val row = rows.optJSONObject(index) ?: continue
+            if (row.optInt("type", -1) == 3) {
+                row.opt("id")?.takeIf { it != JSONObject.NULL }?.toString()?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun JSONObject.toBusinessParams(): MutableMap<String, String> {
+        val params = linkedMapOf<String, String>()
+        for (key in keys()) {
+            val value = opt(key)
+            if (value != null && value != JSONObject.NULL) {
+                params[key] = value.toString()
+            }
+        }
+        return params
+    }
+
     private fun extractCredentialId(node: Any): String? {
-        findString(node, "credential_id", "credentialId")?.takeIf { it.isNotBlank() }?.let { return it }
+        findString(node, "credential_id", "credentialId", "id")?.takeIf { it.isNotBlank() }?.let { return it }
 
         return when (node) {
             is JSONObject -> {
@@ -652,9 +1069,10 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         private const val OAUTH_TYPE_ALIPAY = "alipay_app"
         private const val OAUTH_SIGN_TYPE = "RSA"
         private const val AUTH_NONCE_LENGTH = 32
-        private const val BUSINESS_NONCE_LENGTH = 16
+        private const val BUSINESS_NONCE_LENGTH = 32
         private const val CAPTCHA_FETCH_ATTEMPTS = 2
         private const val CAPTCHA_RETRY_DELAY_MS = 200L
+        private const val DOOR_LOCK_LIST_PATH = "/webapi/v1/door_lock/list"
         private val NONCE_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         private val random = SecureRandom()
         private val CAPTCHA_MARKERS = listOf(
@@ -684,4 +1102,11 @@ class DoorCaptchaRequiredException(
 ) : DoorApiException(
     text = rawText(serverMessage?.takeIf { it.isNotBlank() } ?: "本次登录需要进行验证"),
     serverMessage = serverMessage
+)
+
+data class DoorNfcActivationStep(
+    val requestData: JSONObject,
+    val packets: List<String>,
+    val credentialId: String,
+    val credentialHex: String?
 )
