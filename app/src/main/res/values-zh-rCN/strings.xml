@@ -9,9 +9,12 @@
     <string name="btn_alipay">支付宝登录</string>
     <string name="btn_ble">蓝牙开门</string>
     <string name="btn_captcha_refresh">刷新图片</string>
+    <string name="btn_fob_write">写入钥匙扣</string>
     <string name="btn_syn">同步门禁凭证</string>
     <string name="cfg_hnt">手机号和密码只用于同步本地离线凭证，供 NFC 和蓝牙开门使用。</string>
     <string name="dlg_cfg">配置门禁账号</string>
+    <string name="dlg_fob_net">配置钥匙扣网络</string>
+    <string name="fob_net_hnt">可选。WiFi 用于钥匙扣自动联网刷新凭证；portal 账号即校园网认证的一卡通号（w.seu.edu.cn）。全部留空则仅写入凭证。</string>
     <string name="drBusy">设备已被占用</string>
     <string name="dr_ok">开门成功</string>
     <string name="dt_dev">
@@ -30,6 +33,10 @@
     <string name="fld_captcha">验证码</string>
     <string name="fld_phn">手机号</string>
     <string name="fld_pwd">密码</string>
+    <string name="fld_wifi_ssid">WiFi 名称</string>
+    <string name="fld_wifi_pass">WiFi 密码</string>
+    <string name="fld_portal_user">portal 账号</string>
+    <string name="fld_portal_pass">portal 密码</string>
     <string name="oauth_loading">正在通过支付宝登录…</string>
     <string name="oauth_or">— 或 —</string>
     <string name="sd_bler">设备: %1$s

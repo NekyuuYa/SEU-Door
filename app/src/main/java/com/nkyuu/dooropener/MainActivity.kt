@@ -89,6 +89,15 @@ private class ConfigDialogViews(val root: View) {
     val alipayButton: View = root.requireView(R.id.alipay_login_button)
 }
 
+private class FobNetworkDialogViews(val root: View) {
+    val ssidInput: EditText = root.requireView(R.id.fob_ssid_input)
+    val wifiPassInput: EditText = root.requireView(R.id.fob_wifi_pass_input)
+    val portalUserInput: EditText = root.requireView(R.id.fob_portal_user_input)
+    val portalPassInput: EditText = root.requireView(R.id.fob_portal_pass_input)
+    val cancelButton: View = root.requireView(R.id.fob_cancel_button)
+    val confirmButton: View = root.requireView(R.id.fob_confirm_button)
+}
+
 private fun <T : View> View.requireView(id: Int): T {
     return findViewById<T>(id) ?: throw IllegalStateException("Missing required view: $id")
 }
@@ -99,6 +108,10 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         private const val PREFS_NAME = "door_opener_ui"
         private const val PREF_LAST_TAB = "last_tab"
         private const val PREF_LAST_AUTO_REFRESH = "last_auto_refresh_attempt"
+        private const val PREF_FOB_WIFI_SSID = "fob_wifi_ssid"
+        private const val PREF_FOB_WIFI_PASS = "fob_wifi_pass"
+        private const val PREF_FOB_PORTAL_USER = "fob_portal_user"
+        private const val PREF_FOB_PORTAL_PASS = "fob_portal_pass"
         private const val REQ_BLE_PERMS = 1001
 
         // 凭证防过期：本地凭证超过 24h 未更新（开门轮换/刷新都会推进 updatedAt）就静默刷一次
@@ -1400,6 +1413,55 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             return
         }
 
+        showFobNetworkDialog(snapshot)
+    }
+
+    /**
+     * 钥匙扣 WiFi/portal 配置输入框（可选，全部留空则只下发凭证，行为与旧版一致）。
+     * 输入值存 SharedPreferences 以便下次预填。
+     */
+    private fun showFobNetworkDialog(snapshot: DoorCredentialSnapshot) {
+        val dialogBinding = FobNetworkDialogViews(
+            LayoutInflater.from(this).inflate(R.layout.dialog_fob_network, null)
+        )
+        dialogBinding.ssidInput.setText(prefs.getString(PREF_FOB_WIFI_SSID, "").orEmpty())
+        dialogBinding.wifiPassInput.setText(prefs.getString(PREF_FOB_WIFI_PASS, "").orEmpty())
+        dialogBinding.portalUserInput.setText(prefs.getString(PREF_FOB_PORTAL_USER, "").orEmpty())
+        dialogBinding.portalPassInput.setText(prefs.getString(PREF_FOB_PORTAL_PASS, "").orEmpty())
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogBinding.root)
+            .create()
+
+        dialog.setOnShowListener {
+            dialogBinding.cancelButton.setOnClickListener {
+                dialog.dismiss()
+            }
+            dialogBinding.confirmButton.setOnClickListener {
+                val wifiSsid = dialogBinding.ssidInput.trimmedText()
+                val wifiPass = dialogBinding.wifiPassInput.trimmedText()
+                val portalUser = dialogBinding.portalUserInput.trimmedText()
+                val portalPass = dialogBinding.portalPassInput.trimmedText()
+                prefs.edit()
+                    .putString(PREF_FOB_WIFI_SSID, wifiSsid)
+                    .putString(PREF_FOB_WIFI_PASS, wifiPass)
+                    .putString(PREF_FOB_PORTAL_USER, portalUser)
+                    .putString(PREF_FOB_PORTAL_PASS, portalPass)
+                    .apply()
+                dialog.dismiss()
+                runFobConfig(snapshot, wifiSsid, wifiPass, portalUser, portalPass)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun runFobConfig(
+        snapshot: DoorCredentialSnapshot,
+        wifiSsid: String,
+        wifiPass: String,
+        portalUser: String,
+        portalPass: String
+    ) {
         if (!busy.compareAndSet(false, true)) {
             setBle(
                 getString(R.string.st_ble),
@@ -1418,7 +1480,14 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
         Thread {
             try {
-                val result = DoorFob.configureFob(this, snapshot) { msg ->
+                val result = DoorFob.configureFob(
+                    this,
+                    snapshot,
+                    wifiSsid = wifiSsid,
+                    wifiPass = wifiPass,
+                    portalUser = portalUser,
+                    portalPass = portalPass
+                ) { msg ->
                     runOnUiThread {
                         setBle("配置钥匙扣", msg, DoorStatusKind.Busy)
                     }
@@ -1431,6 +1500,9 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
                             append("信息: ${result.deviceInfo}\n")
                         }
                         append("状态: ${result.statusCode} - ${result.resultMessage}")
+                        result.networkStatusCode?.let { code ->
+                            append("\n网络配置: $code - ${DoorFob.describeStatusCode(code)}")
+                        }
                     }
                     setBle(
                         if (result.success) getString(R.string.st_ok) else getString(R.string.st_fail),

@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.2 (2026-09-03)
+
+### 新增
+- **door-fob ESP32-C3 钥匙扣固件入仓**（`door-fob/`，与 App 配套）
+  - fob 按键分档：短按开门 / 中按联网刷凭证 / 长按进配置窗口
+  - 联网刷新链路：WiFi（SEU 校园网 + eportal 认证）→ SNTP → 签名 API 三段式取凭证
+    （`staff/credentials` → `accommodation/details` → `staff/door_lock/credentials`），
+    与 `DoorApi.kt refreshCredentialOnly` 线上格式对齐
+  - App 只做一次 OAuth 会话导出；会话字段经 BLE 0xFF10 配置服务写入 fob
+  - 构建说明见 `door-fob/README.md`
+- **App：BLE 钥匙扣配置对话框**（WiFi/portal 输入 + 会话导出 + 两次写入 + MTU 517 协商），
+  `DoorFob.kt` / `MainActivity.kt`
+
+### 修复（fob 开门协议，实测可开门）
+- `LE Create Connection` 的 `scan_itvl/scan_window=0` → 控制器 HCI 0x12（rc 530）全部拒连，补为 0x0010
+- 扫描按 `XN-<device_id>` 精确匹配，避免连到楼道里邻居的 XN- 锁
+- GATT 服务发现竞态：0xFF12 特征发现未完成时服务遍历提前 EDONE 误判缺失
+- 16-bit 特征/描述符 UUID（0xFF01/0xFF02/0x2902）按类型匹配（NimBLE 不做 16↔128 归一化）
+- 与锁的交互对齐 App：带响应写 + 写 CCCD 订阅通知 + 等 20 字节 notify 应答
+  （此前 write-no-rsp + 显式 read 永远等不到响应）
+- teardown 等待断开确认，避免下一次连接报 EDONE
+- 配置 JSON 按标准反转义（Android `org.json` 会把 `/` 转义为 `\/`，曾导致 server_url 存坏）
+- 长按配置窗口时长单位修正（注释 60s 实际只有 6s）
+
 ## v1.3.0 (2026-09-02)
 
 ### 修复

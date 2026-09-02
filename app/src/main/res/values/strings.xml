@@ -8,11 +8,14 @@
     <string name="bl_perm">Bluetooth permission is missing</string>
     <string name="btn_ble">Unlock via Bluetooth</string>
     <string name="btn_fob">Configure Key Fob</string>
+    <string name="btn_fob_write">Write to fob</string>
     <string name="btn_alipay">Sign in with Alipay</string>
     <string name="btn_captcha_refresh">Refresh image</string>
     <string name="btn_syn">Sync credential</string>
     <string name="cfg_hnt">Your phone number and password are only used to sync the local offline credential for NFC and Bluetooth unlock.</string>
     <string name="dlg_cfg">Configure door access account</string>
+    <string name="dlg_fob_net">Configure fob network</string>
+    <string name="fob_net_hnt">Optional. WiFi lets the fob refresh its credential on its own; the portal account is your campus card number for w.seu.edu.cn. Leave all blank to write the credential only.</string>
     <string name="drBusy">Device is already in use</string>
     <string name="dr_ok">Unlocked</string>
     <string name="dt_dev">Account: %1$s\nDevice ID: %2$d\nCredential ID: %4$s\nCredential: %3$s</string>
@@ -31,6 +34,10 @@
     <string name="oauth_or">— or —</string>
     <string name="fld_phn">Phone number</string>
     <string name="fld_pwd">Password</string>
+    <string name="fld_wifi_ssid">WiFi name</string>
+    <string name="fld_wifi_pass">WiFi password</string>
+    <string name="fld_portal_user">Portal account</string>
+    <string name="fld_portal_pass">Portal password</string>
     <string name="sd_bler">Device: %1$s
 Address: %2$s
 Result: %3$d - %4$s%5$s</string>

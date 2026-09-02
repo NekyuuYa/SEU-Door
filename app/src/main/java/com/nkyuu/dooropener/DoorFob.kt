@@ -49,12 +49,20 @@ object DoorFob {
     /**
      * 扫描并配置钥匙扣（ESP32-C3 fob），将凭证写入 fob 的 config service。
      *
-     * 流程：扫描 → 连接 → 读取设备信息 → 写入 JSON 凭证 → 读取状态结果。
+     * 载荷拆成两次独立写入（每次都是完整 JSON，fob 按"出现即更新"处理，兼容旧固件）：
+     * 写①凭证 + API 会话（fob 凭此可自行联网刷新凭证）；
+     * 写②WiFi/portal 配置（可选，四个字段全空则跳过）。
+     *
+     * 流程：扫描 → 连接(MTU 协商) → 读取设备信息 → 写入两次 JSON → 各读一次状态结果。
      */
     @SuppressLint("MissingPermission")
     fun configureFob(
         context: Context,
         snapshot: DoorCredentialSnapshot,
+        wifiSsid: String = "",
+        wifiPass: String = "",
+        portalUser: String = "",
+        portalPass: String = "",
         progress: (String) -> Unit = {}
     ): FobConfigResult {
         progress("正在扫描钥匙扣")
@@ -68,19 +76,31 @@ object DoorFob {
             progress("正在读取设备信息")
             val deviceInfo = session.readDeviceInfo()
 
+            // 写①：凭证 + API 会话
             progress("正在写入凭证")
-            val payload = buildCredentialPayload(snapshot)
-            session.writeCredentialPayload(payload)
+            session.writeCredentialPayload(buildCredentialPayload(snapshot))
 
             progress("正在等待状态确认")
-            val statusCode = session.readStatus()
-            val message = describeStatusCode(statusCode)
-            val success = statusCode == 0
+            val statusA = session.readStatus()
 
+            // 写②：WiFi/portal 配置（可选）
+            val hasNet = listOf(wifiSsid, wifiPass, portalUser, portalPass).any { it.isNotBlank() }
+            var statusB = 0
+            if (hasNet) {
+                progress("正在写入网络配置")
+                session.writeCredentialPayload(
+                    buildNetworkPayload(wifiSsid, wifiPass, portalUser, portalPass)
+                )
+                statusB = session.readStatus()
+            }
+
+            val statusCode = if (statusA != 0) statusA else statusB
+            val message = describeStatusCode(statusA)
             return FobConfigResult(
-                success = success,
+                success = statusA == 0 && statusB == 0,
                 statusCode = statusCode,
                 resultMessage = message,
+                networkStatusCode = if (hasNet) statusB else null,
                 deviceInfo = deviceInfo,
                 deviceName = target.displayName,
                 deviceAddress = target.address
@@ -178,15 +198,37 @@ object DoorFob {
     }
 
     /**
-     * 构建写入 0xFF12 的 JSON 凭证载荷。
+     * 构建写入 0xFF12 的 JSON 凭证 + 会话载荷（写①）。
+     * 会话字段非空才放，保持对旧固件的向后兼容。
      */
     private fun buildCredentialPayload(snapshot: DoorCredentialSnapshot): String {
         val json = JSONObject()
         json.put("device_id", snapshot.deviceId)
         json.put("credential", snapshot.credentialHex)
-        json.put("project_id", DoorApi.PROJECT_ID)
+        json.put("project_id", snapshot.projectId)
         json.put("ble_mac", snapshot.bleMac)
         json.put("credential_id", snapshot.credentialId)
+        if (snapshot.serverUrl.isNotBlank()) json.put("server_url", snapshot.serverUrl)
+        if (snapshot.sessionSecret.isNotBlank()) json.put("session_secret", snapshot.sessionSecret)
+        if (snapshot.userId.isNotBlank()) json.put("user_id", snapshot.userId)
+        if (snapshot.identityCode.isNotBlank()) json.put("identity_code", snapshot.identityCode)
+        return json.toString()
+    }
+
+    /**
+     * 构建写入 0xFF12 的 JSON WiFi/portal 载荷（写②，独立生效）。
+     */
+    private fun buildNetworkPayload(
+        ssid: String,
+        pass: String,
+        portalUser: String,
+        portalPass: String
+    ): String {
+        val json = JSONObject()
+        if (ssid.isNotBlank()) json.put("wifi_ssid", ssid)
+        if (pass.isNotBlank()) json.put("wifi_pass", pass)
+        if (portalUser.isNotBlank()) json.put("portal_user", portalUser)
+        if (portalPass.isNotBlank()) json.put("portal_pass", portalPass)
         return json.toString()
     }
 
@@ -213,6 +255,7 @@ object DoorFob {
     ) {
         private val connectionEvents = ArrayBlockingQueue<FobConnectionEvent>(4)
         private val serviceEvents = ArrayBlockingQueue<Int>(2)
+        private val mtuEvents = ArrayBlockingQueue<Int>(4)
         private val descriptorEvents = ArrayBlockingQueue<FobDescriptorEvent>(4)
         private val writeEvents = ArrayBlockingQueue<FobWriteEvent>(4)
         private val notificationEvents = ArrayBlockingQueue<FobNotificationEvent>(16)
@@ -229,6 +272,10 @@ object DoorFob {
 
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 serviceEvents.offer(status)
+            }
+
+            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                mtuEvents.offer(mtu)
             }
 
             override fun onDescriptorWrite(
@@ -332,6 +379,9 @@ object DoorFob {
                 connectedGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
             }
 
+            // 写①载荷约 400 字节，超过默认 MTU 23 的单次写入上限，必须先协商
+            requestMtu(517)
+
             if (connectedGatt.discoverServices() != true) {
                 throw DoorFobException("发现蓝牙服务失败")
             }
@@ -384,6 +434,16 @@ object DoorFob {
             }
             failure.get()?.let { throw DoorFobException("创建蓝牙连接失败", it) }
             return createdGatt.get() ?: throw DoorFobException("蓝牙连接创建失败")
+        }
+
+        /**
+         * 请求协商 MTU（建连成功后调用，写大载荷前必须完成）。
+         */
+        fun requestMtu(mtu: Int) {
+            if (gatt?.requestMtu(mtu) != true) throw DoorFobException("请求 MTU 失败")
+            val negotiated = mtuEvents.poll(OPERATION_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                ?: throw DoorFobException("MTU 协商超时")
+            if (negotiated < mtu) throw DoorFobException("MTU 协商结果不足: $negotiated")
         }
 
         /**
@@ -523,6 +583,7 @@ object DoorFob {
         private fun resetQueues() {
             connectionEvents.clear()
             serviceEvents.clear()
+            mtuEvents.clear()
             descriptorEvents.clear()
             writeEvents.clear()
             notificationEvents.clear()
@@ -549,6 +610,8 @@ data class FobConfigResult(
     val success: Boolean,
     val statusCode: Int,
     val resultMessage: String,
+    /** 写②（WiFi/portal）状态码；未下发网络配置时为 null */
+    val networkStatusCode: Int? = null,
     val deviceInfo: String,
     val deviceName: String,
     val deviceAddress: String
