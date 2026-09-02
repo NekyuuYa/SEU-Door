@@ -259,7 +259,9 @@ object DoorCrypto {
         val calculatedCrc = crc8(byteArrayOf(frame[1], frame[2]) + plainPayload)
         val resultCode = plainPayload.getOrNull(NFC_RESULT_CODE_OFFSET)?.toInt()?.and(0xFF) ?: -1
         val isSuccess = resultCode == 0 || resultCode == 23
-        val updatedCredentialHex = extractUpdatedCredentialFromNfcPayload(plainPayload, isSuccess)
+        // 链式密钥不只在成功帧里出现：门锁报 27（需更新开锁密钥）时也会在响应帧
+        // 7..39 字节直接下发当前密钥（与 BLE 0x76/0x77 刷新同语义），失败帧载荷不足时自然返回 null
+        val updatedCredentialHex = extractUpdatedCredentialFromNfcPayload(plainPayload)
 
         return DoorResponse(
             commandId = commandId,
@@ -303,14 +305,7 @@ object DoorCrypto {
         }
     }
 
-    private fun extractUpdatedCredentialFromNfcPayload(
-        plainPayload: ByteArray,
-        isSuccess: Boolean
-    ): String? {
-        if (!isSuccess) {
-            return null
-        }
-
+    private fun extractUpdatedCredentialFromNfcPayload(plainPayload: ByteArray): String? {
         val payloadStart = NFC_CHAIN_KEY_FRAME_START - NFC_ENCRYPTED_OFFSET
         val payloadEndExclusive = NFC_CHAIN_KEY_FRAME_END_EXCLUSIVE - NFC_ENCRYPTED_OFFSET
         if (payloadStart < 0 || plainPayload.size < payloadEndExclusive) {

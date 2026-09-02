@@ -42,6 +42,8 @@
 设备ID: %2$d
 UID: %3$s</string>
     <string name="sd_rfrg">正在刷新…</string>
+    <string name="sd_retry">正在重试，请保持手机贴近门锁</string>
+    <string name="hint_retap">门锁未响应，请将手机移开后重新贴靠门锁</string>
     <string name="sd_tag">UID: %1$s
 正在读取标签</string>
     <string name="sd_tap">点击下方按钮开门%1$s</string>

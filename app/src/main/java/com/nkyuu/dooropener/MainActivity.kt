@@ -16,6 +16,7 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.method.ScrollingMovementMethod
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -30,10 +31,13 @@ import android.widget.TextView
 import android.widget.Toast
 import android.webkit.WebView
 import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
-
-// 门锁返回这些码说明本地离线凭证已过期/需更新，自动重新同步
-private val CREDENTIAL_REFRESH_CODES = setOf(24, 27)
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 private enum class DoorStatusKind {
     Idle,
@@ -94,7 +98,20 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     companion object {
         private const val PREFS_NAME = "door_opener_ui"
         private const val PREF_LAST_TAB = "last_tab"
+        private const val PREF_LAST_AUTO_REFRESH = "last_auto_refresh_attempt"
         private const val REQ_BLE_PERMS = 1001
+
+        // 凭证防过期：本地凭证超过 24h 未更新（开门轮换/刷新都会推进 updatedAt）就静默刷一次
+        private const val AUTO_REFRESH_CREDENTIAL_AGE_MS = 24 * 60 * 60 * 1000L
+        private const val AUTO_REFRESH_RETRY_GAP_MS = 6 * 60 * 60 * 1000L
+
+        // 失败恢复：toggle ReaderMode 强制 NFC 栈重新评估场内标签的循环参数
+        private const val RECOVERY_ROUNDS = 3
+        private const val RECOVERY_TOGGLE_GAP_MS = 180L
+        private const val RECOVERY_DISCOVERY_TIMEOUT_MS = 1000L
+
+        // 单条流水线内的尝试上限：原始标签 + 恢复循环拿到的新标签
+        private const val MAX_PIPELINE_ATTEMPTS = 2
     }
 
     private lateinit var views: MainViews
@@ -103,7 +120,21 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     private var nfcAdapter: NfcAdapter? = null
 
     private val busy = AtomicBoolean(false)
-    private var isResumed = false
+
+    // NFC 标签串行流水线：新标签事件总是抢占进行中的尝试（generation 递增，
+    // 旧任务在下一个检查点抛 NfcAbortedException 自行放弃），
+    // 避免 busy 期间事件被丢弃导致“必须移开手机再贴一次”。
+    private val nfcExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "nfc-pipeline").apply { isDaemon = true }
+    }
+    private val nfcGeneration = AtomicLong(0)
+    private val nfcWorkPending = AtomicBoolean(false)
+
+    // recovery 循环等待重新发现的标签：onTagDiscovered 优先把标签交给等待者
+    private val discoveryWaiter = AtomicReference<CompletableFuture<Tag>?>(null)
+
+    @Volatile private var isResumed = false
+    @Volatile private var hasCredential = false
     private var pendingBleOpen = false
     private var pendingFobConfig = false
     private var selectedTab = MainTab.Nfc
@@ -114,7 +145,6 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     private var nfcState = StatusState("", "")
     private var bleState = StatusState("", "")
     private var isBusyState = false
-    private var hasCredential = false
 
     // 动画状态追踪：只在状态种类/页签变化时触发图标动画，避免进度刷新时反复抖动
     private var renderedKind: DoorStatusKind? = null
@@ -160,6 +190,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         isResumed = true
         enableReaderModeIfIdle()
         updateIdleStatus()
+        maybeAutoRefreshCredential()
     }
 
     override fun onPause() {
@@ -173,12 +204,18 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
      * 开启 ReaderMode：拿干净的原始 NfcA 通道，平台不插手 NDEF/存在性检查，
      * 自定义命令 transceive(0xB1...) 才能稳定收到门锁响应。
      *
-     * 关键：若正在处理标签（典型是冷启动 intent 里带来的那张标签）就先不抢通道。
+     * 关键：若正在处理标签（典型是 intent 带来的那张）就先不抢通道。
      * 否则 enableReaderMode 会重置 NFC 控制器，把进行中的 NfcA 会话打断。
      * 处理结束后由 setBusyState(false) 再调一次本方法把 ReaderMode 补上。
+     * nfcWorkPending 覆盖「intent 已入队但流水线尚未启动」的窗口（冷启动时
+     * onResume 可能先于 executor 任务执行）。
      */
     private fun enableReaderModeIfIdle() {
-        if (!isResumed || busy.get()) return
+        if (!isResumed || busy.get() || nfcWorkPending.get()) return
+        enableReaderModeNow()
+    }
+
+    private fun enableReaderModeNow() {
         val flags = NfcAdapter.FLAG_READER_NFC_A or
             NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or
             NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
@@ -189,6 +226,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     }
 
     override fun onDestroy() {
+        nfcExecutor.shutdownNow()
         iconColorAnimator?.cancel()
         stopPulse()
         configDialog?.dismiss()
@@ -198,7 +236,12 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     }
 
     override fun onTagDiscovered(tag: Tag) {
-        handleTag(tag)
+        // recovery 循环正在等重新发现的标签时优先交给它，避免再走抢占逻辑
+        val waiter = discoveryWaiter.get()
+        if (waiter != null && waiter.complete(tag)) {
+            return
+        }
+        enqueueTag(tag, preParsedDeviceId = null, viaDispatchIntent = false)
     }
 
     override fun onRequestPermissionsResult(
@@ -827,92 +870,319 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         } else {
             intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
         }
+        if (tag == null) return
 
-        if (tag != null) {
-            handleTag(tag)
-        }
+        // NDEF 派发的 intent 已带系统解析好的 NDEF：直接取 device_id，
+        // 会话内跳过 144 字节重读；TAG_DISCOVERED 兜底路径没有该数据则回落到读标签
+        val preParsedDeviceId = DoorNfcHelper.deviceIdFromIntent(intent)
+        enqueueTag(tag, preParsedDeviceId, viaDispatchIntent = true)
     }
 
-    /** ReaderMode 回调在子线程触发，所有 UI 更新走 runOnUiThread。 */
-    private fun handleTag(tag: Tag) {
-        if (!hasCredential) {
-            val pendingSnapshot = store.load()?.takeIf { it.requiresDigitalCredentialActivation() }
-            if (pendingSnapshot != null) {
-                activatePendingCredential(tag, pendingSnapshot)
+    /**
+     * 把标签投递进串行 NFC 流水线。新标签总是抢占进行中的尝试：
+     * generation 递增后旧任务在下一个 NFC 操作检查点放弃，
+     * 不会出现「busy 期间标签事件被静默丢弃」。
+     */
+    private fun enqueueTag(tag: Tag, preParsedDeviceId: Int?, viaDispatchIntent: Boolean) {
+        nfcWorkPending.set(true)
+        val generation = nfcGeneration.incrementAndGet()
+        DoorOfflineLog.append(
+            "NFC",
+            "tag queued uid=${tag.id.toHexCompact()} generation=$generation intent=$viaDispatchIntent"
+        )
+        nfcExecutor.execute { runTagPipeline(tag, preParsedDeviceId, viaDispatchIntent, generation) }
+    }
+
+    /**
+     * 串行标签处理流水线（nfcExecutor 线程）。
+     *
+     * 结构：一次开门尝试（intent 通道快速失败）→ 若为通信层失败且手机仍贴在门锁上，
+     * 走 [awaitRecoveredTag] 强制重发现标签，拿干净的 ReaderMode 通道再试一次。
+     * 被更新的标签事件抢占时静默放弃（NfcAbortedException），UI 由新流水线接管。
+     */
+    private fun runTagPipeline(tag: Tag, preParsedDeviceId: Int?, viaDispatchIntent: Boolean, generation: Long) {
+        val isCurrent = { nfcGeneration.get() == generation }
+        var claimedBusy = false
+        try {
+            if (!hasCredential) {
+                val pendingSnapshot = store.load()?.takeIf { it.requiresDigitalCredentialActivation() }
+                if (pendingSnapshot != null) {
+                    if (!busy.compareAndSet(false, true)) {
+                        runOnUiThread {
+                            setNfc(getString(R.string.st_hold), getString(R.string.sd_wait), DoorStatusKind.Busy)
+                        }
+                        return
+                    }
+                    claimedBusy = true
+                    activatePendingInline(tag, pendingSnapshot, isCurrent)
+                } else {
+                    runOnUiThread {
+                        setNfc(
+                            getString(R.string.st_fail),
+                            getString(R.string.err_syn),
+                            DoorStatusKind.Error
+                        )
+                        showConfigDialog()
+                    }
+                }
                 return
             }
-            runOnUiThread {
-                setNfc(
-                    getString(R.string.st_fail),
-                    getString(R.string.err_syn),
-                    DoorStatusKind.Error
-                )
-                showConfigDialog()
-            }
-            return
-        }
 
-        if (!busy.compareAndSet(false, true)) {
+            if (!busy.compareAndSet(false, true)) {
+                // 其它操作（刷新凭证/登录）持有 busy：提示等待，不排队
+                runOnUiThread {
+                    setNfc(
+                        getString(R.string.st_hold),
+                        getString(R.string.sd_wait),
+                        DoorStatusKind.Busy
+                    )
+                }
+                return
+            }
+            claimedBusy = true
+
+            val uid = tag.id.toHexCompact()
             runOnUiThread {
+                setBusyState(true)
                 setNfc(
                     getString(R.string.st_hold),
-                    getString(R.string.sd_wait),
+                    getString(R.string.sd_tag, uid),
                     DoorStatusKind.Busy
                 )
             }
-            return
-        }
 
-        val snapshot = store.load() ?: run {
-            busy.set(false)
-            runOnUiThread {
-                setNfc(
-                    getString(R.string.st_fail),
-                    getString(R.string.err_crd),
-                    DoorStatusKind.Error
-                )
-                showConfigDialog()
+            var result: DoorOpenResult? = null
+            var attemptTag = tag
+            var attemptDeviceId = preParsedDeviceId
+            var attemptViaIntent = viaDispatchIntent
+            var attemptsLeft = MAX_PIPELINE_ATTEMPTS
+
+            while (result == null && attemptsLeft > 0 && isCurrent()) {
+                val snapshot = store.load()
+                if (snapshot == null) {
+                    runOnUiThread { showConfigDialog() }
+                    result = DoorOpenResult(
+                        success = false,
+                        title = getString(R.string.st_fail),
+                        uid = uid,
+                        details = getString(R.string.err_crd)
+                    )
+                    break
+                }
+
+                result = tryUnlockOnTag(attemptTag, snapshot, attemptDeviceId, attemptViaIntent, isCurrent)
+                if (result.success || !result.recoverable) break
+
+                attemptsLeft--
+                if (attemptsLeft <= 0 || !isCurrent()) break
+
+                runOnUiThread {
+                    setNfc(getString(R.string.st_hold), getString(R.string.sd_retry), DoorStatusKind.Busy)
+                }
+                val recovered = awaitRecoveredTag(isCurrent) ?: break
+                DoorOfflineLog.append("NFC", "recovery rediscovered tag, retrying on clean channel")
+                attemptTag = recovered
+                attemptDeviceId = result.deviceId
+                attemptViaIntent = false
+                result = null // 重试会产生新的结果
             }
-            return
-        }
 
-        runOnUiThread {
-            setBusyState(true)
-            setNfc(
-                getString(R.string.st_hold),
-                getString(R.string.sd_tag, tag.id.toHexCompact()),
-                DoorStatusKind.Busy
-            )
-        }
-
-        Thread {
-            try {
-                val result = processDoorTag(tag, snapshot)
+            result?.let { outcome ->
+                val details = if (!outcome.success && outcome.recoverable) {
+                    outcome.details + getString(R.string.dt_nop, getString(R.string.hint_retap))
+                } else {
+                    outcome.details
+                }
                 runOnUiThread {
                     setNfc(
-                        result.title,
-                        result.details,
-                        if (result.success) DoorStatusKind.Success else DoorStatusKind.Error
+                        outcome.title,
+                        details,
+                        if (outcome.success) DoorStatusKind.Success else DoorStatusKind.Error
                     )
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    setNfc(
-                        getString(R.string.st_fail),
-                        getString(R.string.sd_tag, tag.id.toHexCompact()) + "\n" + e.resolveMessage(this),
-                        DoorStatusKind.Error
-                    )
-                }
-            } finally {
-                busy.set(false)
+            }
+        } catch (e: NfcAbortedException) {
+            // 被更新的标签事件抢占，本流水线结果作废
+        } finally {
+            if (claimedBusy) busy.set(false)
+            if (nfcGeneration.get() == generation) {
+                nfcWorkPending.set(false)
+            }
+            if (claimedBusy) {
                 runOnUiThread { setBusyState(false) }
             }
-        }.start()
+        }
     }
 
-    private fun activatePendingCredential(tag: Tag, snapshot: DoorCredentialSnapshot) {
-        if (!busy.compareAndSet(false, true)) return
+    /**
+     * 单次标签开门尝试（nfcExecutor 线程）。
+     * 通信层失败（门锁不应答/标签掉线）标记 recoverable，由流水线决定是否走恢复重试；
+     * 门锁返回 [DoorNfcHelper.STALE_CREDENTIAL_CODES] 时在 NfcA 会话保持期间
+     * 更新凭证并重发命令，用户无需再贴一次卡。
+     */
+    private fun tryUnlockOnTag(
+        tag: Tag,
+        snapshot: DoorCredentialSnapshot,
+        preParsedDeviceId: Int?,
+        viaDispatchIntent: Boolean,
+        isCurrent: () -> Boolean
+    ): DoorOpenResult {
+        val uid = tag.id.toHexCompact()
+        DoorNfcHelper.clearDebug()
+        DoorNfcHelper.appendDebug("开始NFC开门 uid=$uid intent=$viaDispatchIntent")
+        try {
+            val outcome = DoorNfcHelper.openDoorSingleSession(
+                tag = tag,
+                credentialHex = snapshot.credentialHex,
+                projectId = snapshot.projectId,
+                preParsedDeviceId = preParsedDeviceId,
+                viaDispatchIntent = viaDispatchIntent,
+                isAborted = { !isCurrent() },
+                onStaleCredential = { code, lockProvidedKey ->
+                    if (code == 27 && lockProvidedKey != null) {
+                        // 门锁在响应帧里直接下发了当前链式密钥（同 BLE 0x76/0x77 的语义）
+                        store.updateCredential(lockProvidedKey)
+                        DoorNfcHelper.appendDebug("使用门锁下发的新链式密钥重试")
+                        lockProvidedKey
+                    } else {
+                        refreshStaleCredential(snapshot, code)
+                    }
+                }
+            )
+            val decoded = outcome.response
+            DoorNfcHelper.appendDebug(
+                "解析结果: code=${decoded.resultCode} success=${decoded.isSuccess} " +
+                    "refreshed=${outcome.refreshedCredential}"
+            )
+            DoorNfcHelper.flushDebug(uid, this)
 
+            // 门锁每次成功开锁可能轮换链式密钥（响应帧 7..39 字节携带新密钥），
+            // 必须持久化，否则下次开门必然落后一拍报 27、被迫手动刷新
+            decoded.updatedCredentialHex?.let { store.updateCredential(it) }
+
+            if (decoded.isSuccess) {
+                val refreshNote = if (outcome.refreshedCredential) {
+                    getString(R.string.dt_nop, rawText("凭证已自动更新，本次直接开门").resolve(this))
+                } else {
+                    ""
+                }
+                return DoorOpenResult(
+                    success = true,
+                    title = getString(R.string.st_ok),
+                    uid = uid,
+                    details = getString(
+                        R.string.sd_res,
+                        decoded.resultMessageResId.resolve(this),
+                        outcome.deviceId,
+                        uid
+                    ) + refreshNote,
+                    deviceId = outcome.deviceId
+                )
+            }
+
+            val staleNote = when {
+                outcome.staleRefreshError != null ->
+                    getString(R.string.dt_nop, staleRefreshErrorText(outcome.staleRefreshError!!))
+                outcome.refreshedCredential ->
+                    getString(R.string.dt_nop, rawText("凭证已自动更新并重试，门锁仍拒绝").resolve(this))
+                else -> ""
+            }
+            return DoorOpenResult(
+                success = false,
+                title = getString(R.string.st_fail),
+                uid = uid,
+                details = getString(
+                    R.string.sd_res,
+                    decoded.resultMessageResId.resolve(this),
+                    outcome.deviceId,
+                    uid
+                ) + staleNote,
+                deviceId = outcome.deviceId
+            )
+        } catch (e: NfcAbortedException) {
+            throw e
+        } catch (e: Exception) {
+            DoorNfcHelper.appendDebug("异常: ${e.javaClass.simpleName}: ${e.message}")
+            DoorNfcHelper.flushDebug(uid, this)
+            return DoorOpenResult(
+                success = false,
+                title = getString(R.string.st_fail),
+                uid = uid,
+                details = getString(R.string.sd_tag, uid) + "\n" + e.resolveMessage(this),
+                recoverable = true
+            )
+        }
+    }
+
+    /**
+     * 门锁报 24/25/27 时在线刷新凭证。在 NFC 会话保持期间调用（网络往返期间标签须保持在场），
+     * 失败抛出由调用方决定回退与提示。返回新的 credentialHex。
+     */
+    private fun refreshStaleCredential(snapshot: DoorCredentialSnapshot, resultCode: Int): String {
+        DoorNfcHelper.appendDebug("门锁要求凭证更新 code=$resultCode，开始在线刷新")
+        val fresh = try {
+            DoorApi().refreshCredentialOnly(snapshot)
+        } catch (fallback: Exception) {
+            if (snapshot.password.isBlank()) throw fallback
+            DoorApi().syncCredential(snapshot.phone, snapshot.password)
+        }
+        if (!fresh.hasOfflineCredential()) {
+            throw DoorApiException(rawText("服务器未返回有效凭证"))
+        }
+        store.save(fresh)
+        hasCredential = true
+        DoorNfcHelper.appendDebug("凭证在线刷新完成 deviceId=${fresh.deviceId}")
+        return fresh.credentialHex
+    }
+
+    private fun staleRefreshErrorText(e: Exception): String {
+        return if (e is DoorCaptchaRequiredException) {
+            rawText("凭证需要更新，自动刷新需要验证码，请到配置页手动同步").resolve(this)
+        } else {
+            rawText("凭证需要更新，自动刷新失败：%1\$s", e.resolveMessage(this)).resolve(this)
+        }
+    }
+
+    /**
+     * 失败恢复：手机仍贴在门锁上时，通过 disable→enable ReaderMode 强制 NFC 栈
+     * 重新评估场内标签——很多系统不会对已在场内的标签重新回调 onTagDiscovered，
+     * 直接补开 ReaderMode 等不来事件，用户只能移开手机。
+     * 拿到重新激活的干净通道后由调用方重试，无需人工重贴。
+     */
+    private fun awaitRecoveredTag(isCurrent: () -> Boolean): Tag? {
+        val waiter = CompletableFuture<Tag>()
+        discoveryWaiter.set(waiter)
+        try {
+            repeat(RECOVERY_ROUNDS) {
+                if (!isCurrent() || !isResumed) return null
+                runOnUiThread { nfcAdapter?.disableReaderMode(this) }
+                SystemClock.sleep(RECOVERY_TOGGLE_GAP_MS)
+                if (!isCurrent() || !isResumed) return null
+                runOnUiThread { if (isResumed) enableReaderModeNow() }
+                try {
+                    return waiter.get(RECOVERY_DISCOVERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                } catch (_: TimeoutException) {
+                    // 本轮 toggle 未重新发现标签，继续下一轮
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                }
+            }
+            return null
+        } finally {
+            discoveryWaiter.compareAndSet(waiter, null)
+            // 取消等待者：若 onTagDiscovered 恰在放弃后完成它，complete 会返回 false，
+            // 标签正确回落到 enqueueTag 而不是被丢弃
+            waiter.cancel(false)
+        }
+    }
+
+    /** 数字钥匙激活（nfcExecutor 线程内联执行；busy 由流水线持有并在 finally 统一释放）。 */
+    private fun activatePendingInline(
+        tag: Tag,
+        snapshot: DoorCredentialSnapshot,
+        isCurrent: () -> Boolean
+    ) {
         runOnUiThread {
             setBusyState(true)
             setNfc(
@@ -922,116 +1192,78 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             )
         }
 
-        Thread {
-            try {
-                val fresh = DoorNfcHelper.activateDigitalCredential(tag, snapshot) { progress ->
-                    runOnUiThread {
-                        setNfc(getString(R.string.st_hold), progress, DoorStatusKind.Busy)
-                    }
-                }
-                store.save(fresh)
+        try {
+            val fresh = DoorNfcHelper.activateDigitalCredential(
+                tag = tag,
+                snapshot = snapshot,
+                isAborted = { !isCurrent() }
+            ) { progress ->
                 runOnUiThread {
-                    hasCredential = true
-                    setNfc(
-                        getString(R.string.st_ok),
-                        rawText("数字钥匙激活成功").resolve(this),
-                        DoorStatusKind.Success
-                    )
+                    setNfc(getString(R.string.st_hold), progress, DoorStatusKind.Busy)
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    setNfc(
-                        getString(R.string.st_fail),
-                        e.resolveMessage(this),
-                        DoorStatusKind.Error
-                    )
-                }
-            } finally {
-                busy.set(false)
-                runOnUiThread { setBusyState(false) }
             }
-        }.start()
+            store.save(fresh)
+            runOnUiThread {
+                hasCredential = true
+                setNfc(
+                    getString(R.string.st_ok),
+                    rawText("数字钥匙激活成功").resolve(this),
+                    DoorStatusKind.Success
+                )
+            }
+        } catch (e: NfcAbortedException) {
+            throw e
+        } catch (e: Exception) {
+            runOnUiThread {
+                setNfc(
+                    getString(R.string.st_fail),
+                    e.resolveMessage(this),
+                    DoorStatusKind.Error
+                )
+            }
+        }
     }
 
-    private fun processDoorTag(tag: Tag, snapshot: DoorCredentialSnapshot): DoorOpenResult {
-        val uid = tag.id.toHexCompact()
-        DoorNfcHelper.clearDebug()
-        DoorNfcHelper.appendDebug("开始NFC开门 uid=$uid")
-        try {
-            val outcome = DoorNfcHelper.openDoorSingleSession(tag, snapshot.credentialHex, snapshot.projectId)
-            val decoded = outcome.response
-            DoorNfcHelper.appendDebug("解析结果: code=${decoded.resultCode} success=${decoded.isSuccess}")
-            DoorNfcHelper.flushDebug(uid, this)
+    /**
+     * 凭证防过期：进入前台时若本地凭证超过 [AUTO_REFRESH_CREDENTIAL_AGE_MS] 未更新
+     * （成功开门的链式密钥轮换、手动/会话内刷新都会推进 updatedAt），
+     * 用缓存的 sessionSecret 静默刷新，避免到门口才报 24/25/27。
+     * 尝试频率不低于 [AUTO_REFRESH_RETRY_GAP_MS] 一次，失败静默（门口还有会话内刷新兜底）。
+     */
+    private fun maybeAutoRefreshCredential() {
+        if (busy.get() || nfcWorkPending.get()) return
+        val snapshot = store.load() ?: return
+        if (!snapshot.hasOfflineCredential() || snapshot.sessionSecret.isBlank()) return
+        val now = System.currentTimeMillis()
+        if (now - snapshot.updatedAt < AUTO_REFRESH_CREDENTIAL_AGE_MS) return
+        if (now - prefs.getLong(PREF_LAST_AUTO_REFRESH, 0L) < AUTO_REFRESH_RETRY_GAP_MS) return
+        if (!busy.compareAndSet(false, true)) return
+        prefs.edit().putLong(PREF_LAST_AUTO_REFRESH, now).apply()
+        DoorOfflineLog.append("AUTH", "auto credential refresh start ageMs=${now - snapshot.updatedAt}")
 
-            if (decoded.isSuccess) {
-                return DoorOpenResult(
-                    true,
-                    getString(R.string.st_ok),
-                    uid,
-                    getString(
-                        R.string.sd_res,
-                        decoded.resultMessageResId.resolve(this),
-                        outcome.deviceId,
-                        uid
-                    )
+        Thread {
+            try {
+                val fresh = DoorApi().refreshCredentialOnly(snapshot)
+                store.save(fresh)
+                DoorOfflineLog.append("AUTH", "auto credential refresh ok")
+                runOnUiThread {
+                    hasCredential = fresh.hasOfflineCredential()
+                    updateIdleStatus()
+                    Toast.makeText(this, getString(R.string.tst_rfr), Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                DoorOfflineLog.append(
+                    "AUTH",
+                    "auto credential refresh failed ${e.javaClass.simpleName}: ${e.message}"
                 )
-            }
-
-            if (decoded.resultCode in CREDENTIAL_REFRESH_CODES &&
-                snapshot.phone.isNotBlank()) {
-                return try {
-                    val fresh = try {
-                        DoorApi().refreshCredentialOnly(snapshot)
-                    } catch (fallback: Exception) {
-                        if (snapshot.password.isBlank()) throw fallback
-                        DoorApi().syncCredential(snapshot.phone, snapshot.password)
-                    }
-                    store.save(fresh)
-                    DoorOpenResult(
-                        false,
-                        getString(R.string.st_crd),
-                        uid,
-                        rawText("原凭证 %1\$s，已自动刷新\n请再贴一次卡开门",
-                            decoded.resultMessageResId.resolve(this)
-                        ).resolve(this)
-                    )
-                } catch (e: Exception) {
-                    DoorOpenResult(
-                        false,
-                        getString(R.string.st_fail),
-                        uid,
-                        if (e is DoorCaptchaRequiredException) {
-                            rawText(
-                                "凭证 %1\$s，自动刷新需要验证码，请到配置页手动同步",
-                                decoded.resultMessageResId.resolve(this)
-                            ).resolve(this)
-                        } else {
-                            rawText(
-                                "凭证 %1\$s，自动刷新失败：%2\$s",
-                                decoded.resultMessageResId.resolve(this),
-                                e.resolveMessage(this)
-                            ).resolve(this)
-                        }
-                    )
+            } finally {
+                busy.set(false)
+                runOnUiThread {
+                    setBusyState(false)
+                    updateIdleStatus()
                 }
             }
-
-            return DoorOpenResult(
-                false,
-                getString(R.string.st_fail),
-                uid,
-                getString(
-                    R.string.sd_res,
-                    decoded.resultMessageResId.resolve(this),
-                    outcome.deviceId,
-                    uid
-                )
-            )
-        } catch (e: Exception) {
-            DoorNfcHelper.appendDebug("异常: ${e.javaClass.simpleName}: ${e.message}")
-            DoorNfcHelper.flushDebug(uid, this)
-            throw e
-        }
+        }.start()
     }
 
     private fun startBleOpen() {
@@ -1253,4 +1485,13 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
     }
 }
 
-data class DoorOpenResult(val success: Boolean, val title: String, val uid: String, val details: String)
+data class DoorOpenResult(
+    val success: Boolean,
+    val title: String,
+    val uid: String,
+    val details: String,
+    /** 通信层失败（门锁不应答/掉线），可通过恢复循环重拿到干净通道后重试 */
+    val recoverable: Boolean = false,
+    /** 本次尝试解析到的门锁 device_id，恢复重试时复用以免再读 NDEF */
+    val deviceId: Int? = null
+)

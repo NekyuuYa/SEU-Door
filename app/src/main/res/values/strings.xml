@@ -41,6 +41,8 @@ Result: %3$d - %4$s%5$s</string>
 Device ID: %2$d
 UID: %3$s</string>
     <string name="sd_rfrg">Refreshing…</string>
+    <string name="sd_retry">Retrying — keep the phone on the lock</string>
+    <string name="hint_retap">The lock did not respond. Move the phone away, then hold it against the lock again.</string>
     <string name="sd_tag">UID: %1$s
 Reading tag</string>
     <string name="sd_tap">Tap the button below to unlock%1$s</string>
