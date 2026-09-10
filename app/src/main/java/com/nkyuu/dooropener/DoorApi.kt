@@ -17,7 +17,9 @@ import java.security.SecureRandom
 class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
     fun syncCredential(phone: String, password: String, code: String? = null): DoorCredentialSnapshot {
-        return buildSnapshotFromLogin(login(phone, password, code), phone = phone, password = password)
+        return logSyncFailureIfAny(phone) {
+            buildSnapshotFromLogin(login(phone, password, code), phone = phone, password = password)
+        }
     }
 
     /**
@@ -25,13 +27,16 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
      * 如果 sessionSecret 已过期（业务请求返回鉴权失败），抛出异常由调用方回落到完整登录流程。
      */
     fun refreshCredentialOnly(snapshot: DoorCredentialSnapshot): DoorCredentialSnapshot {
-        val keyList = fetchStaffCredentials(
+        val keyList = retryBusinessGetOnce(
             baseUrl = snapshot.serverUrl,
             sessionSecret = snapshot.sessionSecret,
             projectId = snapshot.projectId,
             appId = snapshot.appId,
-            userId = snapshot.userId,
-            identityCode = snapshot.identityCode
+            path = "/webapi/v1/staff/credentials",
+            params = mutableMapOf(
+                "user_id" to snapshot.userId,
+                "identitycode" to snapshot.identityCode
+            )
         )
         val keyRecord = firstRecord(keyList)
         val keyCredential = normalizeCredentialHex(
@@ -72,7 +77,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         var credential = findString(detailDoorLock ?: detailData, "credential", "chain_key", "chainKey")
 
         if (credential.isNullOrBlank()) {
-            val credentialData = businessGet(
+            val credentialData = retryBusinessGetOnce(
                 baseUrl = snapshot.serverUrl,
                 sessionSecret = snapshot.sessionSecret,
                 projectId = snapshot.projectId,
@@ -112,7 +117,25 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         val loginData = oauthLogin(authCode, OAUTH_TYPE_ALIPAY)
         DoorOfflineLog.append("AUTH", "OAuth response fields=${describeObjectKeys(loginData)}")
         val phone = findString(loginData, "phone").orEmpty()
-        return buildSnapshotFromLogin(loginData, phone = phone, password = "")
+        return logSyncFailureIfAny(phone) {
+            buildSnapshotFromLogin(loginData, phone = phone, password = "")
+        }
+    }
+
+    /**
+     * 同步链路的任何失败都写离线日志（此前 JSONException 只进 UI，故障现场不可见）。
+     * 记录后原样重抛，不影响调用方的既有错误处理。
+     */
+    private inline fun <T> logSyncFailureIfAny(phone: String, block: () -> T): T {
+        return try {
+            block()
+        } catch (e: Exception) {
+            DoorOfflineLog.append(
+                "AUTH",
+                "sync failed phone=${phone.take(4)}**** ${e.javaClass.simpleName}: ${e.message.orEmpty().take(300)}"
+            )
+            throw e
+        }
     }
 
     /** 取支付宝快捷登录 auth_info（服务器 RSA2 签名的 SDK 串），交给 IAlixPay.Pay()。 */
@@ -194,7 +217,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         var appId = serverAppId
             ?: APP_ID
 
-        val detailData = businessGet(
+        val detailData = retryBusinessGetOnce(
             baseUrl = serverAddr,
             sessionSecret = sessionSecret,
             projectId = projectId,
@@ -216,13 +239,16 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         // the server-issued local chain key on a fresh installation.
         var keyListData: Any? = null
         if (deviceId.isNullOrBlank() || credential.isNullOrBlank()) {
-            keyListData = fetchStaffCredentials(
+            keyListData = retryBusinessGetOnce(
                 baseUrl = serverAddr,
                 sessionSecret = sessionSecret,
                 projectId = projectId,
                 appId = appId,
-                userId = userId,
-                identityCode = identityCode
+                path = "/webapi/v1/staff/credentials",
+                params = mutableMapOf(
+                    "user_id" to userId,
+                    "identitycode" to identityCode
+                )
             )
             val keyRecord = firstRecord(keyListData)
             deviceId = deviceId ?: findString(keyRecord ?: keyListData, "device_id", "deviceId")
@@ -589,6 +615,32 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
         )
     }
 
+    /**
+     * 登录主链路的业务请求：脏数据/网络抖动时重试一次。
+     * 服务器存在多副本不一致时（同一接口时好时坏），第二次请求有机会落到好副本。
+     * 只有解析/读取失败才重试；服务器明确返回 result=false（如 login_timeout）不重试。
+     */
+    private fun retryBusinessGetOnce(
+        baseUrl: String,
+        sessionSecret: String,
+        projectId: Int = PROJECT_ID,
+        appId: Int = APP_ID,
+        path: String,
+        params: MutableMap<String, String>
+    ): Any {
+        return try {
+            businessGet(baseUrl, sessionSecret, projectId, appId, path, params)
+        } catch (first: Exception) {
+            val serverRejected = first is DoorApiException && first.serverMessage != null
+            if (serverRejected) throw first
+            DoorOfflineLog.append(
+                "API",
+                "business get failed, retrying once path=$path ${first.javaClass.simpleName}: ${first.message.orEmpty().take(200)}"
+            )
+            businessGet(baseUrl, sessionSecret, projectId, appId, path, params)
+        }
+    }
+
     private fun businessPost(
         baseUrl: String,
         sessionSecret: String,
@@ -632,27 +684,6 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
             appId = appId,
             path = "/webapi/v1/staff/door_lock/credentials",
             params = params
-        )
-    }
-
-    private fun fetchStaffCredentials(
-        baseUrl: String,
-        sessionSecret: String,
-        projectId: Int,
-        appId: Int,
-        userId: String,
-        identityCode: String
-    ): Any {
-        return businessGet(
-            baseUrl = baseUrl,
-            sessionSecret = sessionSecret,
-            projectId = projectId,
-            appId = appId,
-            path = "/webapi/v1/staff/credentials",
-            params = mutableMapOf(
-                "user_id" to userId,
-                "identitycode" to identityCode
-            )
         )
     }
 
@@ -814,19 +845,37 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     private fun decodeDataString(value: String): Any {
         val trimmed = value.trim()
         if (trimmed.startsWith("{")) {
-            return JSONObject(trimmed)
+            return parseJsonOrSalvage(trimmed, isObject = true)
         }
         if (trimmed.startsWith("[")) {
-            return JSONArray(trimmed)
+            return parseJsonOrSalvage(trimmed, isObject = false)
         }
 
         val decodedText = decodeBase64Text(trimmed) ?: return trimmed
         val normalized = decodedText.trim()
         return when {
-            normalized.startsWith("{") -> JSONObject(normalized)
-            normalized.startsWith("[") -> JSONArray(normalized)
+            normalized.startsWith("{") -> parseJsonOrSalvage(normalized, isObject = true)
+            normalized.startsWith("[") -> parseJsonOrSalvage(normalized, isObject = false)
             else -> normalized
         }
+    }
+
+    /**
+     * 服务器偶发返回含脏字节的 JSON（历史故障：accommodation.name 值里嵌入裸引号 +
+     * 二进制垃圾，JSONObject 在 ~char 294 抛 Unterminated object，炸穿整个登录流程）。
+     * 严格解析失败时降级为 RawJsonText：findString 等提取器改用正则从原始文本抢救
+     * 业务所需字段（device_id / credential 等都有强格式校验，不会误用脏值）。
+     */
+    private fun parseJsonOrSalvage(text: String, isObject: Boolean): Any {
+        val parsed = runCatching {
+            if (isObject) JSONObject(text) else JSONArray(text)
+        }.getOrNull()
+        if (parsed != null) return parsed
+        DoorOfflineLog.append(
+            "API",
+            "json parse failed, falling back to salvage extraction len=${text.length}"
+        )
+        return RawJsonText(text)
     }
 
     private fun extractSvgSnippet(text: String): String? {
@@ -917,12 +966,14 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 
     private fun firstRow(node: Any): JSONObject? {
+        if (node is RawJsonText) return null
         return (node as? JSONObject)
             ?.optJSONArray("rows")
             ?.optJSONObject(0)
     }
 
     private fun firstRecord(node: Any): JSONObject? {
+        if (node is RawJsonText) return null
         return when (node) {
             is JSONArray -> node.optJSONObject(0)
             is JSONObject -> node.optJSONArray("rows")?.optJSONObject(0)
@@ -940,6 +991,14 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 
     private fun extractDigitalCredentialId(node: Any): String? {
+        if (node is RawJsonText) {
+            // 数组原文里找 type=3 的记录 id："type": 3 ... "id": N（同一记录内就近配对）
+            val recordRegex = Regex("\\{[^{}]*\"type\"\\s*:\\s*3[^{}]*\\}")
+            for (record in recordRegex.findAll(node.text)) {
+                salvageIntField(record.value, "id")?.let { return it.toString() }
+            }
+            return null
+        }
         val rows = (node as? JSONObject)?.optJSONArray("rows") ?: return null
         for (index in 0 until rows.length()) {
             val row = rows.optJSONObject(index) ?: continue
@@ -963,6 +1022,15 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
     private fun extractCredentialId(node: Any): String? {
         findString(node, "credential_id", "credentialId", "id")?.takeIf { it.isNotBlank() }?.let { return it }
+
+        if (node is RawJsonText) {
+            // 与 JSONObject 路径同语义：数组内第一条记录的 id / 对象内 rows 第一条的 id
+            val recordRegex = Regex("\\{[^{}]*\\}")
+            for (record in recordRegex.findAll(node.text)) {
+                salvageIntField(record.value, "id")?.let { return it.toString() }
+            }
+            return null
+        }
 
         return when (node) {
             is JSONObject -> {
@@ -993,6 +1061,7 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
     }
 
     private fun findString(node: Any, vararg keys: String): String? {
+        if (node is RawJsonText) return findStringInRawText(node.text, keys)
         val keySet = keys.toSet()
         return when (node) {
             is JSONObject -> {
@@ -1026,6 +1095,39 @@ class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
             else -> null
         }
+    }
+
+    /**
+     * 从解析失败的 JSON 原文里按 key 顺序正则抢救字段值。
+     * 支持嵌套查找（与 findString 的递归语义一致：顶层未命中时深入子对象）。
+     * 值必须不含未转义的控制字符，防止把脏数据半截读进来。
+     */
+    private fun findStringInRawText(text: String, keys: Array<out String>): String? {
+        for (key in keys) {
+            salvageStringField(text, key)?.let { return it }
+        }
+        return null
+    }
+
+    private fun salvageStringField(text: String, key: String): String? {
+        // "key" : "value" —— 值内允许 \" 转义，但不允许控制字符
+        val regex = Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"((?:[^\"\\\\\\x00-\\x1F]|\\\\.)*)\"")
+        val match = regex.find(text) ?: return null
+        val raw = match.groupValues[1]
+        val unescaped = raw
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+            .replace("\\/", "/")
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+        return unescaped.takeIf { it.isNotBlank() }
+    }
+
+    /** 从 JSON 原文里抢救整数字段："key" : 123。 */
+    private fun salvageIntField(text: String, key: String): Long? {
+        val regex = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+)")
+        return regex.find(text)?.groupValues?.get(1)?.toLongOrNull()
     }
 
     private fun encodeParams(params: Map<String, String>): String {
@@ -1096,6 +1198,14 @@ open class DoorApiException(
     val serverMessage: String? = null,
     cause: Throwable? = null
 ) : LocalizedIOException(text, cause)
+
+/**
+ * 无法严格解析的 JSON 原文。携带足够信息供提取器用正则抢救关键字段，
+ * 提取结果一律过原有格式校验（64-hex / 正整数），不合法即视为缺失。
+ */
+class RawJsonText(val text: String) {
+    override fun toString(): String = text
+}
 
 class DoorCaptchaRequiredException(
     serverMessage: String?
