@@ -39,15 +39,15 @@ object DoorOfflineLog {
         }
     }
 
-    private const val MAX_MESSAGE_BYTES = 1024
+    private const val MAX_MESSAGE_CHARS = 1024
 
     /**
      * 服务器偶发返回含脏字节的响应，直接落盘会让日志文件变成二进制不可读。
      * 这里把 <0x20 的控制字符（保留 \t \n \r）转成可见转义，并对单条消息截断。
      */
     private fun sanitize(message: String): String {
-        if (message.length > MAX_MESSAGE_BYTES) {
-            return sanitize(message.take(MAX_MESSAGE_BYTES)) + "…(truncated)"
+        if (message.length > MAX_MESSAGE_CHARS) {
+            return sanitize(message.take(MAX_MESSAGE_CHARS)) + "…(truncated)"
         }
         val sb = StringBuilder(message.length)
         for (ch in message) {
