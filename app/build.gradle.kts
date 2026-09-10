@@ -25,8 +25,8 @@ android {
         applicationId = "com.whxinna.userplatform"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.2"
+        versionCode = 5
+        versionName = "2.2.1"
 
         // Only ship the locales this app currently targets.
         resourceConfigurations.addAll(listOf("en", "zh-rCN"))
