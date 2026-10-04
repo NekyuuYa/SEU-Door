@@ -7,6 +7,11 @@ interface LocalizedMessage {
     fun resolveMessage(context: Context): String
 }
 
+fun Throwable.resolveMessage(context: Context): String = when (this) {
+    is LocalizedMessage -> resolveMessage(context)
+    else -> message ?: context.getString(R.string.err_unk)
+}
+
 interface TextValue {
     fun resolve(context: Context): String
 }

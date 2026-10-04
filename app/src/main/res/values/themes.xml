@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.DoorOpener" parent="@android:style/Theme.Material.Light.NoActionBar">
+    <style name="Base.Theme.DoorOpener" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/color_surface</item>
         <item name="android:colorBackground">@color/color_surface</item>
         <item name="android:colorAccent">@color/color_primary</item>
@@ -9,9 +9,10 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@color/color_surface</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:alertDialogTheme">@style/Theme.DoorOpener.AlertDialog</item>
     </style>
+
+    <style name="Theme.DoorOpener" parent="@style/Base.Theme.DoorOpener" />
 
     <style name="Theme.DoorOpener.AlertDialog" parent="@android:style/Theme.Material.Light.Dialog.Alert">
         <item name="android:windowBackground">@android:color/transparent</item>
