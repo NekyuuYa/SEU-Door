@@ -8,6 +8,7 @@
 - NFC 唤起：app 未在前台时贴门锁标签可自动拉起并直接开门；intent 通道失败时自动切换 ReaderMode 干净通道重试，无需移开重贴
 - BLE 开门：扫描或直连门锁蓝牙，发送加密凭证开门
 - 凭证同步：使用手机号和密码从服务器拉取 device_id、credential、ble_mac 等信息
+- 密码重置：在登录/配置窗口通过绑定手机号和短信验证码设置新的六位数字密码
 - 凭证防过期：NFC/BLE 开门后持久化门锁轮换的链式密钥；遇 `24/25/27` 在会话内自动更新并重发；前台静默预刷新超过 24h 未更新的凭证
 - 本地安全存储：凭证快照使用 Android Keystore + AES-GCM 加密保存
 
@@ -18,14 +19,17 @@
 - Min SDK：26
 - Target SDK：34
 - 运行时依赖：仅 `kotlin-stdlib`
-- 当前 release APK：约 `75KB`（比原版小一千倍）
+- Release 构建启用 R8 代码压缩和资源裁剪
 
 ## 项目结构
 
 ```text
 app/src/main/java/com/nkyuu/dooropener/
 ├── MainActivity.kt       # 主界面、NFC ReaderMode、BLE/NFC 状态与配置弹窗
-├── DoorApi.kt            # 登录、门锁详情、凭证同步、签名与响应解析
+├── DoorApi.kt            # 登录、密码重置、门锁详情、凭证同步、签名与响应解析
+├── PasswordResetDialog.kt  # 短信验证码与密码重置窗口
+├── PasswordResetRules.kt   # 输入校验与短信重发倒计时
+├── PasswordResetSession.kt # 保留屏幕旋转期间的请求状态和结果
 ├── DoorBle.kt            # BLE 扫描、连接、通知、开门与凭证刷新协议
 ├── DoorCrypto.kt         # 密钥派生、RC4、CRC8、NFC/BLE 命令构造与响应解析
 ├── DoorConfigStore.kt    # 凭证快照读写
@@ -43,21 +47,37 @@ app/src/main/java/com/nkyuu/dooropener/
 ./gradlew assembleRelease
 ```
 
-release 包输出路径：
+需要 JDK 17、Android SDK Platform 34 和 Build Tools 34.0.0。Windows 使用 `gradlew.bat` 执行对应任务。
+
+APK 输出路径：
 
 ```text
+app/build/outputs/apk/debug/app-debug.apk
 app/build/outputs/apk/release/app-release.apk
+app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
-当前工程的 `release` 签名配置继承自 `debug` 签名，仅用于本地安装与测试，不适合正式分发。
+本地存在 debug keystore 时，`release` 使用 debug 签名并输出 `app-release.apk`，适合本地测试；不存在时输出 `app-release-unsigned.apk`。正式分发需要另外配置发布签名。
+
+验证命令：
+
+```bash
+./gradlew testDebugUnitTest assembleDebug lintDebug
+```
+
+密码重置测试覆盖输入校验、短信倒计时、HTTP 请求签名与参数、服务端错误处理，以及屏幕旋转期间的请求保留与重复提交保护。HTTP 测试使用本地模拟服务器，不会向真实账号发送短信或修改密码。
+
+生命周期单元测试通过模拟会话观察者的解绑、重新绑定来验证请求保留，不等同于 Android 实机旋转测试。真实短信发送、密码重置及 Android 8–11 的权限行为仍需实机验证。
 
 ## 安装
 
-设备连接 `adb` 后可直接覆盖安装：
+`app-debug.apk` 是完整安装包，可以单独安装。启用 USB 调试并授权电脑后，也可以通过 `adb` 安装：
 
 ```bash
-adb install -r app/build/outputs/apk/release/app-release.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+同包名且签名一致时，`-r` 会覆盖升级并保留应用数据。本项目与官方应用使用相同包名 `com.whxinna.userplatform`；若签名不同，无法直接覆盖安装，需要先卸载已有应用。卸载会删除该应用的本地数据，重新安装后需要登录并同步凭证。
 
 ## 使用方式
 
@@ -65,6 +85,15 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 - 手机号
 - 密码
+
+忘记密码时：
+
+1. 在登录/配置窗口点击“忘记密码”。已有凭证时，可以从右上角设置按钮进入配置窗口。
+2. 输入账号绑定的手机号，点击发送验证码。发送成功后开始 60 秒重发倒计时。
+3. 输入短信验证码、新的六位数字密码及确认密码，提交重置。
+4. 重置成功后回到配置窗口，手机号和新密码会自动填入；点击“同步凭证”完成登录。
+
+重置操作本身不会覆盖已有的离线门禁凭证。发送短信或提交重置期间会禁用重复操作；旋转屏幕后会保留正在进行的请求和结果。发送失败不会启动重发倒计时，服务端拒绝或网络错误会显示在窗口内。
 
 同步成功后：
 
@@ -85,8 +114,10 @@ Manifest 中当前使用：
 
 - `NFC`
 - `INTERNET`
-- `BLUETOOTH` / `BLUETOOTH_ADMIN` / `ACCESS_FINE_LOCATION`（Android 11 及以下）
+- `BLUETOOTH` / `BLUETOOTH_ADMIN` / `ACCESS_COARSE_LOCATION` / `ACCESS_FINE_LOCATION`（Android 11 及以下；定位权限用于蓝牙扫描）
 - `BLUETOOTH_SCAN` / `BLUETOOTH_CONNECT`（Android 12 及以上）
+
+旧版蓝牙和定位权限均设置 `maxSdkVersion="30"`。Android 12 及以上使用“附近设备”权限，蓝牙扫描声明 `neverForLocation`，不申请定位权限。
 
 设备特性：
 

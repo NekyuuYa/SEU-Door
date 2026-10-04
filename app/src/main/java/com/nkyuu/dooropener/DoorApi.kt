@@ -16,6 +16,31 @@ import java.security.SecureRandom
 
 class DoorApi(private val authServerUrl: String = DEFAULT_AUTH_SERVER_URL) {
 
+    fun sendPasswordResetCode(phone: String) {
+        require(PasswordResetRules.isValidPhone(phone)) { "Invalid phone number" }
+        // Sending SMS is a side effect: do not retry automatically on ambiguous network failures.
+        authGet(
+            path = "/webapi/users/sendresetpwdSMS",
+            params = mutableMapOf("phone" to phone),
+            nonceLength = AUTH_NONCE_LENGTH
+        )
+    }
+
+    fun resetPassword(phone: String, code: String, newPassword: String) {
+        require(PasswordResetRules.validate(phone, code, newPassword, newPassword) == null) {
+            "Invalid password reset input"
+        }
+        val params = signParams(
+            params = mutableMapOf("phone" to phone, "code" to code, "newpwd" to newPassword),
+            secret = AUTH_SIGN_SECRET,
+            nonceLength = AUTH_NONCE_LENGTH,
+            projectId = null,
+            appId = null
+        )
+        // Keep the new password in the POST body rather than the URL.
+        performPost(normalizeServerUrl(authServerUrl), "/webapi/oauth/pwd_reset", params)
+    }
+
     fun syncCredential(phone: String, password: String, code: String? = null): DoorCredentialSnapshot {
         return logSyncFailureIfAny(phone) {
             buildSnapshotFromLogin(login(phone, password, code), phone = phone, password = password)

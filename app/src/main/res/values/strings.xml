@@ -1,5 +1,22 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
+    <string name="reset_forgot_password">Forgot password?</string>
+    <string name="reset_title">Reset password</string>
+    <string name="reset_hint">Verify your account by SMS, then choose a new six-digit password.</string>
+    <string name="reset_sms_code">SMS verification code</string>
+    <string name="reset_new_password">New password (six digits)</string>
+    <string name="reset_confirm_password">Confirm new password</string>
+    <string name="reset_send_code">Send code</string>
+    <string name="reset_resend_seconds">Resend in %1$d s</string>
+    <string name="reset_sending">Sending…</string>
+    <string name="reset_submit">Reset password</string>
+    <string name="reset_submitting">Resetting…</string>
+    <string name="reset_code_sent">Verification code sent</string>
+    <string name="reset_success">Password reset. Tap Sync credential to sign in with your new password.</string>
+    <string name="reset_invalid_phone">Enter a valid 11-digit mobile number.</string>
+    <string name="reset_invalid_code">Enter the SMS verification code (4–8 digits).</string>
+    <string name="reset_invalid_password">The new password must contain exactly six digits.</string>
+    <string name="reset_password_mismatch">The two passwords do not match.</string>
     <string name="act_rfs">Refresh credential</string>
     <string name="act_set">Settings</string>
     <string name="app_name">SEU Door</string>
@@ -18,7 +35,7 @@
     <string name="fob_net_hnt">Optional. WiFi lets the fob refresh its credential on its own; the portal account is your campus card number for w.seu.edu.cn. Leave all blank to write the credential only.</string>
     <string name="drBusy">Device is already in use</string>
     <string name="dr_ok">Unlocked</string>
-    <string name="dt_dev">Account: %1$s\nDevice ID: %2$d\nCredential ID: %4$s\nCredential: %3$s</string>
+    <string name="dt_dev">Account: %1$s\nDevice ID: %2$d</string>
     <string name="dt_nop">
 %1$s</string>
     <string name="err_crd">Credential unavailable</string>

@@ -55,6 +55,10 @@ android {
         aidl = true
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     // Strip metadata that's only needed for Kotlin reflection / build tooling.
     // This app uses no kotlin-reflect (only `Foo::class.java`), so these are dead weight.
     packaging {
@@ -75,4 +79,6 @@ dependencies {
     // No third-party runtime dependencies on purpose: the app uses only platform
     // APIs and the Kotlin stdlib supplied by the Kotlin plugin. Dropping core-ktx,
     // activity, and view binding keeps the dex focused on app code only.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
 }

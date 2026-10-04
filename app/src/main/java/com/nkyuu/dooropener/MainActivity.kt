@@ -87,6 +87,7 @@ private class ConfigDialogViews(val root: View) {
     val cancelButton: View = root.requireView(R.id.cancel_button)
     val syncButton: View = root.requireView(R.id.sync_button)
     val alipayButton: View = root.requireView(R.id.alipay_login_button)
+    val forgotPasswordButton: View = root.requireView(R.id.forgot_password_button)
 }
 
 private class FobNetworkDialogViews(val root: View) {
@@ -186,9 +187,11 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         setupViews()
         updateIdleStatus()
 
-        if (!hasCredential) {
+        val retainedReset = lastNonConfigurationInstance as? PasswordResetSession
+        if (!hasCredential || retainedReset != null) {
             showConfigDialog()
         }
+        if (retainedReset != null) configViews?.let { showPasswordResetDialog(it, retainedReset) }
         handleNfcIntent(intent)
     }
 
@@ -242,6 +245,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         nfcExecutor.shutdownNow()
         iconColorAnimator?.cancel()
         stopPulse()
+        passwordResetDialog?.dismiss()
+        passwordResetDialog = null
         configDialog?.dismiss()
         configDialog = null
         configViews = null
@@ -519,6 +524,40 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         return (value * resources.displayMetrics.density).toInt()
     }
 
+    private var passwordResetDialog: PasswordResetDialog? = null
+    private var passwordResetSession: PasswordResetSession? = null
+
+    override fun onRetainNonConfigurationInstance(): Any? = passwordResetSession
+
+    private fun showPasswordResetDialog(dialogBinding: ConfigDialogViews, retained: PasswordResetSession? = null) {
+        if (passwordResetDialog != null || !busy.compareAndSet(false, true)) return
+        setBusyState(true)
+        val session = retained ?: PasswordResetDialog.createSession(this, dialogBinding.phoneInput.trimmedText())
+        passwordResetSession = session
+        passwordResetDialog = PasswordResetDialog(
+            activity = this,
+            session = session,
+            onComplete = { phone, password ->
+                if (configViews === dialogBinding) {
+                    dialogBinding.phoneInput.setText(phone)
+                    dialogBinding.passwordInput.setText(password)
+                    dialogBinding.errorMessage.visibility = View.GONE
+                    setCaptchaVisible(dialogBinding, false)
+                }
+            },
+            onDismiss = {
+                passwordResetDialog = null
+                if (!isChangingConfigurations) passwordResetSession = null
+                busy.set(false)
+                if (!isFinishing && !isDestroyed && !isChangingConfigurations) {
+                    setBusyState(false)
+                    updateIdleStatus()
+                }
+            }
+        )
+        passwordResetDialog?.show()
+    }
+
     private fun showConfigDialog() {
         configDialog?.show()
         if (configDialog != null) return
@@ -535,6 +574,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
             .create()
 
         dialog.setOnShowListener {
+            dialogBinding.forgotPasswordButton.setOnClickListener { showPasswordResetDialog(dialogBinding) }
             dialogBinding.cancelButton.setOnClickListener {
                 dialog.dismiss()
             }
@@ -629,6 +669,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         dialogBinding.captchaRefreshButton.isEnabled = !loading
         dialogBinding.syncButton.isEnabled = !loading
         dialogBinding.alipayButton.isEnabled = !loading
+        dialogBinding.forgotPasswordButton.isEnabled = !loading
         dialogBinding.cancelButton.isEnabled = !loading && hasCredential
     }
 
@@ -709,9 +750,8 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
         val snapshot = store.load()
         val activationPending = snapshot?.requiresDigitalCredentialActivation() == true
-        val credentialPreview = snapshot?.credentialHex.orEmpty()
         val account = snapshot?.let {
-            getString(R.string.dt_dev, it.phone, it.deviceId, credentialPreview, it.credentialId)
+            getString(R.string.dt_dev, it.phone, it.deviceId)
         }.orEmpty()
 
         when {
@@ -1302,7 +1342,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         } else {
-            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            listOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
         }
         val missing = permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
@@ -1404,7 +1444,7 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         } else {
-            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            listOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
         }
         val missing = permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
@@ -1549,12 +1589,6 @@ class MainActivity : Activity(), NfcAdapter.ReaderCallback {
         refreshCaptcha(dialogBinding, phone)
     }
 
-    private fun Throwable.resolveMessage(context: MainActivity): String {
-        return when (this) {
-            is LocalizedMessage -> resolveMessage(context)
-            else -> message ?: context.getString(R.string.err_unk)
-        }
-    }
 }
 
 data class DoorOpenResult(
